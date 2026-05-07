@@ -158,7 +158,7 @@ else()
   set(SDL_PTHREADS_DEFAULT OFF)
 endif()
 
-if(UNIX_SYS OR ANDROID)
+if(UNIX_SYS OR ANDROID OR WIIU)
   set(SDL_CLOCK_GETTIME_DEFAULT ON)
 else()
   set(SDL_CLOCK_GETTIME_DEFAULT OFF)
@@ -216,7 +216,7 @@ if(EMSCRIPTEN)
   set(SDL_SHARED_AVAILABLE OFF)
 endif()
 
-if(VITA OR PSP OR PS2 OR N3DS OR RISCOS OR NGAGE OR DOS)
+if(VITA OR PSP OR PS2 OR N3DS OR WIIU OR RISCOS OR NGAGE OR DOS)
   set(SDL_SHARED_AVAILABLE OFF)
 endif()
 
@@ -3623,6 +3623,58 @@ elseif(N3DS)
     "${SDL3_SOURCE_DIR}/src/io/n3ds/*.c"
     "${SDL3_SOURCE_DIR}/src/io/n3ds/*.h"
   )
+
+elseif(WIIU)
+  set(SDL_FILESYSTEM_UNIX 1)
+  sdl_glob_sources("${SDL3_SOURCE_DIR}/src/filesystem/unix/*.c")
+  set(HAVE_SDL_FILESYSTEM TRUE)
+
+  set(SDL_STORAGE_GENERIC 1)
+  sdl_glob_sources("${SDL3_SOURCE_DIR}/src/storage/generic/*.c")
+  set(HAVE_SDL_STORAGE TRUE)
+
+  set(SDL_FSOPS_POSIX 1)
+  sdl_sources("${SDL3_SOURCE_DIR}/src/filesystem/posix/SDL_sysfsops.c")
+  set(HAVE_SDL_FSOPS TRUE)
+
+  sdl_glob_sources("${SDL3_SOURCE_DIR}/src/locale/unix/*.c")
+  set(HAVE_SDL_LOCALE TRUE)
+
+  set(SDL_TIME_UNIX 1)
+  sdl_glob_sources("${SDL3_SOURCE_DIR}/src/time/unix/*.c")
+  set(HAVE_SDL_TIME TRUE)
+
+  set(SDL_TIMER_UNIX 1)
+  sdl_glob_sources("${SDL3_SOURCE_DIR}/src/timer/unix/*.c")
+  set(HAVE_SDL_TIMERS TRUE)
+
+  set(SDL_THREAD_WIIU 1)
+  sdl_sources(
+    "${SDL3_SOURCE_DIR}/src/thread/wiiu/SDL_systhread.c"
+    "${SDL3_SOURCE_DIR}/src/thread/wiiu/SDL_systhread_c.h"
+    "${SDL3_SOURCE_DIR}/src/thread/wiiu/SDL_sysmutex.c"
+    "${SDL3_SOURCE_DIR}/src/thread/wiiu/SDL_sysmutex_c.h"
+    "${SDL3_SOURCE_DIR}/src/thread/wiiu/SDL_syssem.c"
+    "${SDL3_SOURCE_DIR}/src/thread/generic/SDL_syscond.c"
+    "${SDL3_SOURCE_DIR}/src/thread/generic/SDL_syscond_c.h"
+    "${SDL3_SOURCE_DIR}/src/thread/generic/SDL_sysrwlock.c"
+    "${SDL3_SOURCE_DIR}/src/thread/generic/SDL_sysrwlock_c.h"
+    "${SDL3_SOURCE_DIR}/src/thread/generic/SDL_systls.c"
+  )
+  set(HAVE_SDL_THREADS TRUE)
+
+  if(SDL_CLOCK_GETTIME)
+    check_library_exists(c clock_gettime "" FOUND_CLOCK_GETTIME_LIBC)
+    if(FOUND_CLOCK_GETTIME_LIBC)
+      set(HAVE_CLOCK_GETTIME 1)
+    else()
+      check_library_exists(rt clock_gettime "" FOUND_CLOCK_GETTIME_LIBRT)
+      if(FOUND_CLOCK_GETTIME_LIBRT)
+        set(HAVE_CLOCK_GETTIME 1)
+        sdl_link_dependency(clock LIBS rt)
+      endif()
+    endif()
+  endif()
 
 elseif(DOS)
   sdl_glob_sources("${SDL3_SOURCE_DIR}/src/main/dos/*.c")

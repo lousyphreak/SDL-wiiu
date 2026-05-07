@@ -376,6 +376,7 @@
 #cmakedefine SDL_THREAD_PSP 1
 #cmakedefine SDL_THREAD_PS2 1
 #cmakedefine SDL_THREAD_N3DS 1
+#cmakedefine SDL_THREAD_WIIU 1
 #cmakedefine SDL_THREAD_DOS 1
 
 #cmakedefine SDL_THREAD_PRIVATE 1
