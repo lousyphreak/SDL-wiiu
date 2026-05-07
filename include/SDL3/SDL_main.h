@@ -254,6 +254,15 @@
         */
         #define SDL_MAIN_AVAILABLE
 
+    #elif defined(SDL_PLATFORM_WIIU)
+        /*
+          On Wii U SDL provides a main function that initializes ProcUI
+          lifecycle handling before calling your SDL_main().
+
+          If you provide this yourself, you may define SDL_MAIN_HANDLED
+         */
+        #define SDL_MAIN_AVAILABLE
+
     #endif
 #endif /* SDL_MAIN_HANDLED */
 

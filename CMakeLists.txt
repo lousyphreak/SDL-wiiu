@@ -3625,6 +3625,12 @@ elseif(N3DS)
   )
 
 elseif(WIIU)
+  sdl_glob_sources(
+    "${SDL3_SOURCE_DIR}/src/main/wiiu/*.c"
+    "${SDL3_SOURCE_DIR}/src/core/wiiu/*.c"
+    "${SDL3_SOURCE_DIR}/src/core/wiiu/*.h"
+  )
+
   set(SDL_FILESYSTEM_UNIX 1)
   sdl_glob_sources("${SDL3_SOURCE_DIR}/src/filesystem/unix/*.c")
   set(HAVE_SDL_FILESYSTEM TRUE)

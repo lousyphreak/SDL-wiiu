@@ -46,6 +46,10 @@
 #include "../video/android/SDL_androidevents.h"
 #endif
 
+#ifdef SDL_PLATFORM_WIIU
+#include "../core/wiiu/SDL_wiiulifecycle.h"
+#endif
+
 #ifdef SDL_PLATFORM_UNIX
 #include "../tray/SDL_tray_utils.h"
 #endif
@@ -1540,6 +1544,11 @@ static void SDL_PumpEventsInternal(bool push_sentinel)
 #ifdef SDL_USE_LIBDBUS
     // DBus event processing is independent of the video subsystem
     SDL_DBus_PumpEvents();
+#endif
+
+#ifdef SDL_PLATFORM_WIIU
+    // ProcUI lifecycle handling is independent of the video subsystem.
+    SDL_WIIU_PumpLifecycle();
 #endif
 
 #ifdef SDL_PLATFORM_ANDROID
