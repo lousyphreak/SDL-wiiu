@@ -24,9 +24,8 @@
 
 #include "SDL_wiiuvideo.h"
 
+#include "../../core/wiiu/SDL_wiiudrc.h"
 #include "../../events/SDL_touch_c.h"
-
-#include <vpad/input.h>
 
 #define WIIU_TOUCH_ID     1
 #define WIIU_TOUCH_FINGER 1
@@ -118,23 +117,17 @@ void SDL_WIIU_QuitTouch(void)
 void SDL_WIIU_PollTouch(SDL_VideoDevice *_this)
 {
     SDL_VideoData *driverdata = (SDL_VideoData *)_this->internal;
-    VPADStatus status;
-    VPADTouchData touch;
-    VPADReadError error = VPAD_READ_SUCCESS;
+    const SDL_WiiUDRCState *drc_state = SDL_WIIU_GetDRCState();
     SDL_Window *window = NULL;
     bool pressed = false;
     float x = 0.0f;
     float y = 0.0f;
 
-    SDL_zero(status);
-    SDL_zero(touch);
-
-    if (driverdata->drc_connected && VPADRead(VPAD_CHAN_0, &status, 1, &error) > 0 && error == VPAD_READ_SUCCESS) {
-        VPADGetTPCalibratedPointEx(VPAD_CHAN_0, VPAD_TP_854X480, &touch, &status.tpNormal);
+    if (driverdata->drc_connected && drc_state && drc_state->connected && drc_state->has_status) {
         window = SDL_WIIU_GetOutputWindow(_this, SDL_WIIU_DISPLAY_DRC);
-        pressed = (touch.touched != 0) &&
-                  (touch.validity == VPAD_VALID) &&
-                  SDL_WIIU_NormalizeTouchForWindow(_this, window, driverdata, &touch, &x, &y);
+        pressed = (drc_state->touch.touched != 0) &&
+                  (drc_state->touch.validity == VPAD_VALID) &&
+                  SDL_WIIU_NormalizeTouchForWindow(_this, window, driverdata, &drc_state->touch, &x, &y);
     }
 
     if (pressed && SDL_WIIU_touch_state.pressed &&

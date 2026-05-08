@@ -24,6 +24,7 @@
 
 #include "SDL_wiiuvideo.h"
 
+#include "../../core/wiiu/SDL_wiiudrc.h"
 #include "../../core/wiiu/SDL_wiiulifecycle.h"
 #include "../../events/SDL_keyboard_c.h"
 
@@ -858,8 +859,7 @@ static bool SDL_WIIU_VideoInit(SDL_VideoDevice *_this)
     SDL_WIIU_SetLifecycleCallbacks(SDL_WIIU_ForegroundAcquired, SDL_WIIU_ForegroundReleased, _this);
     SDL_WIIU_ForegroundAcquired(_this);
 
-    VPADInit();
-    driverdata->vpad_initialized = true;
+    driverdata->vpad_initialized = SDL_WIIU_InitDRC();
     SDL_WIIU_InitTouch();
     driverdata->keyboard_initialized = SDL_WIIU_InitKeyboard(_this);
 
@@ -878,7 +878,7 @@ static void SDL_WIIU_VideoQuit(SDL_VideoDevice *_this)
     SDL_WIIU_QuitTouch();
 
     if (driverdata->vpad_initialized) {
-        VPADShutdown();
+        SDL_WIIU_QuitDRC();
         driverdata->vpad_initialized = false;
     }
 

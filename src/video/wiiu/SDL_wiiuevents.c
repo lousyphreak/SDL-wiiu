@@ -23,9 +23,11 @@
 #ifdef SDL_VIDEO_DRIVER_WIIU
 
 #include "SDL_wiiuvideo.h"
+#include "../../core/wiiu/SDL_wiiudrc.h"
 
 void SDL_WIIU_PumpEvents(SDL_VideoDevice *_this)
 {
+    SDL_WIIU_BeginDRCUpdateCycle();
     SDL_WIIU_PollTouch(_this);
 }
 

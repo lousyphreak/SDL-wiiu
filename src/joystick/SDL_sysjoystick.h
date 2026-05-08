@@ -273,6 +273,7 @@ extern SDL_JoystickDriver SDL_PSP_JoystickDriver;
 extern SDL_JoystickDriver SDL_VITA_JoystickDriver;
 extern SDL_JoystickDriver SDL_N3DS_JoystickDriver;
 extern SDL_JoystickDriver SDL_GAMEINPUT_JoystickDriver;
+extern SDL_JoystickDriver SDL_WIIU_JoystickDriver;
 extern SDL_JoystickDriver SDL_DOS_JoystickDriver;
 
 // Ends C function definitions when using C++
