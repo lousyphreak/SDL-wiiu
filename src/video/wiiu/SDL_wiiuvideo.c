@@ -73,6 +73,7 @@ static bool SDL_WIIU_InitMEM1Heap(SDL_VideoData *driverdata);
 static void SDL_WIIU_DestroyMEM1Heap(SDL_VideoData *driverdata);
 static bool SDL_WIIU_AllocateScanTarget(SDL_VideoData *driverdata, SDL_WiiUScanTarget *target);
 static void SDL_WIIU_ClearScanTarget(SDL_WiiUScanTarget *target);
+static bool SDL_WIIU_GetScanTargetConfiguration(SDL_WiiUScanTarget *target, SDL_Window *window, uint32_t *render_width, uint32_t *render_height, uint32_t *scan_width, uint32_t *scan_height, GX2TVRenderMode *tv_render_mode, GX2DrcRenderMode *drc_render_mode);
 static bool SDL_WIIU_AddDisplay(SDL_VideoData *driverdata, SDL_WiiUDisplayKind kind, const char *name, int x, int y, int w, int h, SDL_DisplayID *out_display);
 static void SDL_WIIU_DRCConnectCallback(uint32_t drc_slot, BOOL attached);
 static bool SDL_WIIU_IsActiveWindow(SDL_Window *window);
@@ -158,20 +159,7 @@ void SDL_WIIU_GetPresentationRect(int src_w, int src_h, int dst_w, int dst_h, SD
 
 void SDL_WIIU_GetWindowPresentationSize(SDL_VideoDevice *_this, SDL_Window *window, int *w, int *h)
 {
-    SDL_WindowData *windowdata = window ? window->internal : NULL;
-    SDL_VideoDisplay *display = windowdata ? SDL_GetVideoDisplay(windowdata->display_id) : NULL;
-
     (void)_this;
-
-    if (display && display->current_mode) {
-        if (w) {
-            *w = display->current_mode->w;
-        }
-        if (h) {
-            *h = display->current_mode->h;
-        }
-        return;
-    }
 
     if (w) {
         *w = window ? window->w : 0;
@@ -181,7 +169,204 @@ void SDL_WIIU_GetWindowPresentationSize(SDL_VideoDevice *_this, SDL_Window *wind
     }
 }
 
-void SDL_WIIU_UpdateOutputWindows(SDL_VideoDevice *_this)
+static bool SDL_WIIU_GetTVScanDimensions(GX2TVRenderMode tv_render_mode, uint32_t *w, uint32_t *h)
+{
+    uint32_t width;
+    uint32_t height;
+
+    switch (tv_render_mode) {
+    case GX2_TV_RENDER_MODE_STANDARD_480P:
+        width = 640;
+        height = 480;
+        break;
+    case GX2_TV_RENDER_MODE_WIDE_480P:
+        width = 854;
+        height = 480;
+        break;
+    case GX2_TV_RENDER_MODE_WIDE_720P:
+        switch (GX2GetSystemTVScanMode()) {
+        case GX2_TV_SCAN_MODE_576I:
+            width = 640;
+            height = 360;
+            break;
+        case GX2_TV_SCAN_MODE_480I:
+        case GX2_TV_SCAN_MODE_480P:
+        case GX2_TV_SCAN_MODE_720P:
+        case GX2_TV_SCAN_MODE_1080I:
+        case GX2_TV_SCAN_MODE_1080P:
+        default:
+            width = 1280;
+            height = 720;
+            break;
+        }
+        break;
+    case GX2_TV_RENDER_MODE_WIDE_1080P:
+        switch (GX2GetSystemTVScanMode()) {
+        case GX2_TV_SCAN_MODE_576I:
+        case GX2_TV_SCAN_MODE_480I:
+            width = 960;
+            height = 540;
+            break;
+        case GX2_TV_SCAN_MODE_480P:
+        case GX2_TV_SCAN_MODE_720P:
+        case GX2_TV_SCAN_MODE_1080I:
+        case GX2_TV_SCAN_MODE_1080P:
+        default:
+            width = 1920;
+            height = 1080;
+            break;
+        }
+        break;
+    default:
+        return false;
+    }
+
+    if (w) {
+        *w = width;
+    }
+    if (h) {
+        *h = height;
+    }
+    return true;
+}
+
+static bool SDL_WIIU_GetTVRenderTargetLimit(GX2TVRenderMode tv_render_mode, uint32_t *w, uint32_t *h)
+{
+    switch (tv_render_mode) {
+    case GX2_TV_RENDER_MODE_STANDARD_480P:
+        if (w) {
+            *w = 640;
+        }
+        if (h) {
+            *h = 480;
+        }
+        return true;
+    case GX2_TV_RENDER_MODE_WIDE_480P:
+        if (w) {
+            *w = 854;
+        }
+        if (h) {
+            *h = 480;
+        }
+        return true;
+    case GX2_TV_RENDER_MODE_WIDE_720P:
+        if (w) {
+            *w = 1280;
+        }
+        if (h) {
+            *h = 720;
+        }
+        return true;
+    case GX2_TV_RENDER_MODE_WIDE_1080P:
+        if (w) {
+            *w = 1920;
+        }
+        if (h) {
+            *h = 1080;
+        }
+        return true;
+    default:
+        return false;
+    }
+}
+
+static bool SDL_WIIU_GetScanTargetConfiguration(SDL_WiiUScanTarget *target, SDL_Window *window, uint32_t *render_width, uint32_t *render_height, uint32_t *scan_width, uint32_t *scan_height, GX2TVRenderMode *tv_render_mode, GX2DrcRenderMode *drc_render_mode)
+{
+    const uint32_t target_render_width = window ? (uint32_t)SDL_max(window->w, 1) : target->width;
+    const uint32_t target_render_height = window ? (uint32_t)SDL_max(window->h, 1) : target->height;
+
+    if (render_width) {
+        *render_width = target_render_width;
+    }
+    if (render_height) {
+        *render_height = target_render_height;
+    }
+
+    if (target->kind == SDL_WIIU_DISPLAY_TV) {
+        const GX2TVRenderMode candidates[] = {
+            GX2_TV_RENDER_MODE_STANDARD_480P,
+            GX2_TV_RENDER_MODE_WIDE_480P,
+            GX2_TV_RENDER_MODE_WIDE_720P,
+            GX2_TV_RENDER_MODE_WIDE_1080P
+        };
+        GX2TVRenderMode best_mode = GX2_TV_RENDER_MODE_DISABLED;
+        uint32_t best_scan_width = 0;
+        uint32_t best_scan_height = 0;
+        Uint64 best_area = 0;
+        bool found = false;
+        size_t i;
+
+        for (i = 0; i < SDL_arraysize(candidates); ++i) {
+            uint32_t render_limit_width;
+            uint32_t render_limit_height;
+            uint32_t candidate_width;
+            uint32_t candidate_height;
+            Uint64 candidate_area;
+
+            if (!SDL_WIIU_GetTVRenderTargetLimit(candidates[i], &render_limit_width, &render_limit_height)) {
+                continue;
+            }
+            if (target_render_width > render_limit_width || target_render_height > render_limit_height) {
+                continue;
+            }
+            if (!SDL_WIIU_GetTVScanDimensions(candidates[i], &candidate_width, &candidate_height)) {
+                continue;
+            }
+
+            candidate_area = (Uint64)candidate_width * (Uint64)candidate_height;
+            if (!found ||
+                candidate_area < best_area ||
+                (candidate_area == best_area &&
+                 (candidate_width < best_scan_width ||
+                  (candidate_width == best_scan_width && candidate_height < best_scan_height)))) {
+                found = true;
+                best_area = candidate_area;
+                best_mode = candidates[i];
+                best_scan_width = candidate_width;
+                best_scan_height = candidate_height;
+            }
+        }
+
+        if (!found) {
+            return SDL_SetError("Wii U TV render target size %ux%u exceeds the supported TV render target modes", target_render_width, target_render_height);
+        }
+
+        if (scan_width) {
+            *scan_width = best_scan_width;
+        }
+        if (scan_height) {
+            *scan_height = best_scan_height;
+        }
+        if (tv_render_mode) {
+            *tv_render_mode = best_mode;
+        }
+        if (drc_render_mode) {
+            *drc_render_mode = target->drc_render_mode;
+        }
+    } else {
+        GX2DrcRenderMode mode = GX2GetSystemDRCMode();
+
+        if (mode == GX2_DRC_RENDER_MODE_DISABLED) {
+            mode = GX2_DRC_RENDER_MODE_SINGLE;
+        }
+        if (scan_width) {
+            *scan_width = target->width;
+        }
+        if (scan_height) {
+            *scan_height = target->height;
+        }
+        if (tv_render_mode) {
+            *tv_render_mode = target->tv_render_mode;
+        }
+        if (drc_render_mode) {
+            *drc_render_mode = mode;
+        }
+    }
+
+    return true;
+}
+
+bool SDL_WIIU_UpdateOutputWindows(SDL_VideoDevice *_this)
 {
     SDL_VideoData *driverdata = (SDL_VideoData *)_this->internal;
     SDL_Window *tv_window;
@@ -189,6 +374,17 @@ void SDL_WIIU_UpdateOutputWindows(SDL_VideoDevice *_this)
     SDL_VideoDisplay *tv_display;
     SDL_VideoDisplay *drc_display;
     const int active_window_count = SDL_WIIU_GetActiveWindowCount(_this);
+    uint32_t tv_render_width;
+    uint32_t tv_render_height;
+    uint32_t tv_scan_width;
+    uint32_t tv_scan_height;
+    uint32_t drc_render_width;
+    uint32_t drc_render_height;
+    uint32_t drc_scan_width;
+    uint32_t drc_scan_height;
+    GX2TVRenderMode tv_render_mode;
+    GX2DrcRenderMode drc_render_mode;
+    bool need_rebuild;
 
     for (SDL_Window *window = _this->windows; window; window = window->next) {
         SDL_WindowData *windowdata;
@@ -212,6 +408,45 @@ void SDL_WIIU_UpdateOutputWindows(SDL_VideoDevice *_this)
     if (drc_display) {
         drc_display->fullscreen_window = drc_window;
     }
+
+    if (!SDL_WIIU_GetScanTargetConfiguration(&driverdata->tv, tv_window, &tv_render_width, &tv_render_height, &tv_scan_width, &tv_scan_height, &tv_render_mode, NULL) ||
+        !SDL_WIIU_GetScanTargetConfiguration(&driverdata->drc, drc_window, &drc_render_width, &drc_render_height, &drc_scan_width, &drc_scan_height, NULL, &drc_render_mode)) {
+        return false;
+    }
+
+    need_rebuild =
+        driverdata->tv.render_width != tv_render_width ||
+        driverdata->tv.render_height != tv_render_height ||
+        driverdata->tv.scan_width != tv_scan_width ||
+        driverdata->tv.scan_height != tv_scan_height ||
+        driverdata->tv.tv_render_mode != tv_render_mode ||
+        driverdata->drc.render_width != drc_render_width ||
+        driverdata->drc.render_height != drc_render_height ||
+        driverdata->drc.scan_width != drc_scan_width ||
+        driverdata->drc.scan_height != drc_scan_height ||
+        driverdata->drc.drc_render_mode != drc_render_mode;
+
+    driverdata->tv.render_width = tv_render_width;
+    driverdata->tv.render_height = tv_render_height;
+    driverdata->tv.scan_width = tv_scan_width;
+    driverdata->tv.scan_height = tv_scan_height;
+    driverdata->tv.tv_render_mode = tv_render_mode;
+
+    driverdata->drc.render_width = drc_render_width;
+    driverdata->drc.render_height = drc_render_height;
+    driverdata->drc.scan_width = drc_scan_width;
+    driverdata->drc.scan_height = drc_scan_height;
+    driverdata->drc.drc_render_mode = drc_render_mode;
+
+    if (need_rebuild && driverdata->foreground_ready) {
+        SDL_WIIU_ForegroundReleased(_this);
+        SDL_WIIU_ForegroundAcquired(_this);
+        if (!driverdata->foreground_ready) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 static void SDL_WIIU_DeleteDevice(SDL_VideoDevice *device)
@@ -279,6 +514,7 @@ static void SDL_WIIU_ConfigureTVMode(SDL_WiiUScanTarget *target)
 {
     switch (GX2GetSystemTVScanMode()) {
     case GX2_TV_SCAN_MODE_480I:
+    case GX2_TV_SCAN_MODE_576I:
     case GX2_TV_SCAN_MODE_480P:
         if (GX2GetSystemTVAspectRatio() == GX2_ASPECT_RATIO_16_9) {
             target->tv_render_mode = GX2_TV_RENDER_MODE_WIDE_480P;
@@ -303,6 +539,11 @@ static void SDL_WIIU_ConfigureTVMode(SDL_WiiUScanTarget *target)
         target->height = 720;
         break;
     }
+
+    target->render_width = target->width;
+    target->render_height = target->height;
+    target->scan_width = target->width;
+    target->scan_height = target->height;
 }
 
 static void SDL_WIIU_ConfigureDRCMode(SDL_WiiUScanTarget *target)
@@ -313,6 +554,10 @@ static void SDL_WIIU_ConfigureDRCMode(SDL_WiiUScanTarget *target)
     }
     target->width = 854;
     target->height = 480;
+    target->render_width = target->width;
+    target->render_height = target->height;
+    target->scan_width = target->width;
+    target->scan_height = target->height;
 }
 
 static bool SDL_WIIU_AddDisplay(SDL_VideoData *driverdata, SDL_WiiUDisplayKind kind, const char *name, int x, int y, int w, int h, SDL_DisplayID *out_display)
@@ -468,8 +713,8 @@ static bool SDL_WIIU_AllocateScanTarget(SDL_VideoData *driverdata, SDL_WiiUScanT
     SDL_zero(target->color_buffer);
     color_surface->use = GX2_SURFACE_USE_TEXTURE_COLOR_BUFFER_TV;
     color_surface->dim = GX2_SURFACE_DIM_TEXTURE_2D;
-    color_surface->width = target->width;
-    color_surface->height = target->height;
+    color_surface->width = target->render_width;
+    color_surface->height = target->render_height;
     color_surface->depth = 1;
     color_surface->mipLevels = 1;
     color_surface->format = target->surface_format;
@@ -495,15 +740,15 @@ static bool SDL_WIIU_AllocateScanTarget(SDL_VideoData *driverdata, SDL_WiiUScanT
     GX2SetupContextStateEx(target->context_state, TRUE);
     GX2SetContextState(target->context_state);
     GX2SetColorBuffer(&target->color_buffer, GX2_RENDER_TARGET_0);
-    GX2SetViewport(0.0f, 0.0f, (float)target->width, (float)target->height, 0.0f, 1.0f);
-    GX2SetScissor(0, 0, target->width, target->height);
+    GX2SetViewport(0.0f, 0.0f, (float)target->render_width, (float)target->render_height, 0.0f, 1.0f);
+    GX2SetScissor(0, 0, target->render_width, target->render_height);
 
     if (target->kind == SDL_WIIU_DISPLAY_TV) {
         GX2SetTVBuffer(target->scan_buffer, target->total_size, target->tv_render_mode, target->surface_format, GX2_BUFFERING_MODE_DOUBLE);
-        GX2SetTVScale(target->width, target->height);
+        GX2SetTVScale(target->scan_width, target->scan_height);
     } else {
         GX2SetDRCBuffer(target->scan_buffer, target->total_size, target->drc_render_mode, target->surface_format, GX2_BUFFERING_MODE_DOUBLE);
-        GX2SetDRCScale(target->width, target->height);
+        GX2SetDRCScale(target->scan_width, target->scan_height);
     }
 
     return true;
@@ -744,7 +989,12 @@ static bool SDL_WIIU_CreateWindow(SDL_VideoDevice *_this, SDL_Window *window, SD
     windowdata->framebuffer_vsync = 1;
     window->internal = windowdata;
 
-    SDL_WIIU_UpdateOutputWindows(_this);
+    if (!SDL_WIIU_UpdateOutputWindows(_this)) {
+        window->internal = NULL;
+        SDL_free(windowdata);
+        SDL_WIIU_UpdateOutputWindows(_this);
+        return false;
+    }
     SDL_SetKeyboardFocus(window);
     return true;
 }
@@ -772,22 +1022,13 @@ static SDL_DisplayID SDL_WIIU_GetDisplayForWindow(SDL_VideoDevice *_this, SDL_Wi
 
 static void SDL_WIIU_GetWindowSizeInPixels(SDL_VideoDevice *_this, SDL_Window *window, int *w, int *h)
 {
-    SDL_VideoDisplay *display = SDL_GetVideoDisplay(SDL_WIIU_GetDisplayForWindow(_this, window));
+    (void)_this;
 
-    if (display) {
-        if (w) {
-            *w = display->current_mode->w;
-        }
-        if (h) {
-            *h = display->current_mode->h;
-        }
-    } else {
-        if (w) {
-            *w = window->w;
-        }
-        if (h) {
-            *h = window->h;
-        }
+    if (w) {
+        *w = window ? window->w : 0;
+    }
+    if (h) {
+        *h = window ? window->h : 0;
     }
 }
 

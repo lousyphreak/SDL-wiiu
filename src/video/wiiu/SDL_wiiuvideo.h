@@ -69,6 +69,10 @@ typedef struct SDL_WiiUScanTarget
     SDL_WiiUDisplayKind kind;
     uint32_t width;
     uint32_t height;
+    uint32_t render_width;
+    uint32_t render_height;
+    uint32_t scan_width;
+    uint32_t scan_height;
     GX2SurfaceFormat surface_format;
     GX2TVRenderMode tv_render_mode;
     GX2DrcRenderMode drc_render_mode;
@@ -127,7 +131,7 @@ extern void SDL_WIIU_DestroyWindowFramebuffer(SDL_VideoDevice *_this, SDL_Window
 extern void SDL_WIIU_PumpEvents(SDL_VideoDevice *_this);
 
 extern SDL_Window *SDL_WIIU_GetOutputWindow(SDL_VideoDevice *_this, SDL_WiiUDisplayKind kind);
-extern void SDL_WIIU_UpdateOutputWindows(SDL_VideoDevice *_this);
+extern bool SDL_WIIU_UpdateOutputWindows(SDL_VideoDevice *_this);
 extern void SDL_WIIU_GetPresentationRect(int src_w, int src_h, int dst_w, int dst_h, SDL_Rect *rect);
 extern void SDL_WIIU_GetWindowPresentationSize(SDL_VideoDevice *_this, SDL_Window *window, int *w, int *h);
 

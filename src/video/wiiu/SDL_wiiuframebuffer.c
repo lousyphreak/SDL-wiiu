@@ -499,15 +499,15 @@ static void SDL_WIIU_RenderWindowToTarget(SDL_VideoData *driverdata, SDL_Window 
     SDL_WindowData *windowdata = window->internal;
     SDL_Rect dstrect;
 
-    SDL_WIIU_GetPresentationRect(surface->w, surface->h, (int)target->width, (int)target->height, &dstrect);
-    SDL_WIIU_UpdateBlitVertices(driverdata, &dstrect, target->width, target->height);
+    SDL_WIIU_GetPresentationRect(surface->w, surface->h, (int)target->render_width, (int)target->render_height, &dstrect);
+    SDL_WIIU_UpdateBlitVertices(driverdata, &dstrect, target->render_width, target->render_height);
 
     GX2SetContextState(target->context_state);
     GX2ClearColor(&target->color_buffer, 0.0f, 0.0f, 0.0f, 1.0f);
     GX2SetContextState(target->context_state);
     GX2SetColorBuffer(&target->color_buffer, GX2_RENDER_TARGET_0);
-    GX2SetViewport(0.0f, 0.0f, (float)target->width, (float)target->height, 0.0f, 1.0f);
-    GX2SetScissor(0, 0, target->width, target->height);
+    GX2SetViewport(0.0f, 0.0f, (float)target->render_width, (float)target->render_height, 0.0f, 1.0f);
+    GX2SetScissor(0, 0, target->render_width, target->render_height);
     GX2SetCullOnlyControl(GX2_FRONT_FACE_CCW, FALSE, FALSE);
     GX2SetColorControl(GX2_LOGIC_OP_COPY, 0xFF, FALSE, TRUE);
     GX2SetBlendControl(GX2_RENDER_TARGET_0,
@@ -536,10 +536,13 @@ bool SDL_WIIU_CreateWindowFramebuffer(SDL_VideoDevice *_this, SDL_Window *window
 {
     SDL_Surface *framebuffer;
     SDL_VideoDisplay *display = SDL_GetVideoDisplay(SDL_GetDisplayForWindow(window));
+    int width;
+    int height;
 
     SDL_WIIU_DestroyWindowFramebuffer(_this, window);
 
-    framebuffer = SDL_CreateSurface(display->current_mode->w, display->current_mode->h, display->current_mode->format);
+    SDL_GetWindowSizeInPixels(window, &width, &height);
+    framebuffer = SDL_CreateSurface(width, height, display ? display->current_mode->format : SDL_PIXELFORMAT_RGBA8888);
     if (!framebuffer) {
         return false;
     }
