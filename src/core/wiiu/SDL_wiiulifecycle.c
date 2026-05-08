@@ -53,12 +53,11 @@ typedef struct SDL_WiiULifecycleState
     bool procui_active;
     bool from_hbl;
     bool release_acknowledged;
-    uint32_t startup_core;
-    uint32_t main_core;
-    ProcUIStatus previous_status;
-    ProcUIStatus current_status;
     SDL_WiiULifecyclePhase phase;
     SDL_AtomicInt home_button_exit_requested;
+    SDL_WIIU_LifecycleCallback on_acquire;
+    SDL_WIIU_LifecycleCallback on_release;
+    void *callback_userdata;
 } SDL_WiiULifecycleState;
 
 static SDL_WiiULifecycleState SDL_wiiu_lifecycle;
@@ -105,10 +104,6 @@ bool SDL_WIIU_InitLifecycle(void)
     }
 
     SDL_zero(SDL_wiiu_lifecycle);
-    SDL_wiiu_lifecycle.startup_core = OSGetCoreId();
-    SDL_wiiu_lifecycle.main_core = OSGetMainCoreId();
-    SDL_wiiu_lifecycle.previous_status = PROCUI_STATUS_IN_FOREGROUND;
-    SDL_wiiu_lifecycle.current_status = PROCUI_STATUS_IN_FOREGROUND;
     SDL_wiiu_lifecycle.phase = SDL_WIIU_LIFECYCLE_FOREGROUND;
 
     title_id = OSGetTitleID();
@@ -163,14 +158,15 @@ void SDL_WIIU_PumpLifecycle(void)
     }
 
     status = ProcUIProcessMessages(TRUE);
-    SDL_wiiu_lifecycle.previous_status = SDL_wiiu_lifecycle.current_status;
-    SDL_wiiu_lifecycle.current_status = status;
 
     switch (status) {
     case PROCUI_STATUS_IN_FOREGROUND:
         if (SDL_wiiu_lifecycle.phase == SDL_WIIU_LIFECYCLE_RELEASING_FOREGROUND ||
             SDL_wiiu_lifecycle.phase == SDL_WIIU_LIFECYCLE_BACKGROUND) {
             SDL_OnApplicationWillEnterForeground();
+            if (SDL_wiiu_lifecycle.on_acquire) {
+                SDL_wiiu_lifecycle.on_acquire(SDL_wiiu_lifecycle.callback_userdata);
+            }
             SDL_OnApplicationDidEnterForeground();
         }
         SDL_wiiu_lifecycle.release_acknowledged = false;
@@ -180,6 +176,9 @@ void SDL_WIIU_PumpLifecycle(void)
     case PROCUI_STATUS_RELEASE_FOREGROUND:
         if (SDL_wiiu_lifecycle.phase == SDL_WIIU_LIFECYCLE_FOREGROUND) {
             SDL_OnApplicationWillEnterBackground();
+            if (SDL_wiiu_lifecycle.on_release) {
+                SDL_wiiu_lifecycle.on_release(SDL_wiiu_lifecycle.callback_userdata);
+            }
             SDL_wiiu_lifecycle.phase = SDL_WIIU_LIFECYCLE_RELEASING_FOREGROUND;
         }
         if (!SDL_wiiu_lifecycle.release_acknowledged) {
@@ -213,9 +212,13 @@ bool SDL_WIIU_IsInForeground(void)
     return SDL_wiiu_lifecycle.phase == SDL_WIIU_LIFECYCLE_FOREGROUND;
 }
 
-bool SDL_WIIU_IsExiting(void)
+void SDL_WIIU_SetLifecycleCallbacks(SDL_WIIU_LifecycleCallback on_acquire,
+                                    SDL_WIIU_LifecycleCallback on_release,
+                                    void *userdata)
 {
-    return SDL_wiiu_lifecycle.phase == SDL_WIIU_LIFECYCLE_EXITING;
+    SDL_wiiu_lifecycle.on_acquire = on_acquire;
+    SDL_wiiu_lifecycle.on_release = on_release;
+    SDL_wiiu_lifecycle.callback_userdata = userdata;
 }
 
 #endif // SDL_PLATFORM_WIIU

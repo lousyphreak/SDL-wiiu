@@ -27,6 +27,10 @@ bool SDL_WIIU_InitLifecycle(void);
 void SDL_WIIU_QuitLifecycle(void);
 void SDL_WIIU_PumpLifecycle(void);
 bool SDL_WIIU_IsInForeground(void);
-bool SDL_WIIU_IsExiting(void);
+
+typedef void (*SDL_WIIU_LifecycleCallback)(void *userdata);
+void SDL_WIIU_SetLifecycleCallbacks(SDL_WIIU_LifecycleCallback on_acquire,
+                                    SDL_WIIU_LifecycleCallback on_release,
+                                    void *userdata);
 
 #endif // SDL_wiiulifecycle_h_

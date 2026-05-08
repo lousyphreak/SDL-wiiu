@@ -3625,6 +3625,15 @@ elseif(N3DS)
   )
 
 elseif(WIIU)
+  if(SDL_VIDEO)
+    set(SDL_VIDEO_DRIVER_WIIU 1)
+    sdl_glob_sources(
+      "${SDL3_SOURCE_DIR}/src/video/wiiu/*.c"
+      "${SDL3_SOURCE_DIR}/src/video/wiiu/*.h"
+    )
+    set(HAVE_SDL_VIDEO TRUE)
+  endif()
+
   sdl_glob_sources(
     "${SDL3_SOURCE_DIR}/src/main/wiiu/*.c"
     "${SDL3_SOURCE_DIR}/src/core/wiiu/*.c"
