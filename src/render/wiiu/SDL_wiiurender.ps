@@ -1,0 +1,123 @@
+#version 450
+
+layout(location = 0) in vec4 v_color;
+layout(location = 1) in vec2 v_texcoord;
+layout(location = 0) out vec4 out_color;
+
+layout(binding = 0) uniform sampler2D u_texture0;
+layout(binding = 1) uniform sampler2D u_texture1;
+layout(binding = 2) uniform sampler2D u_texture2;
+
+layout(std140, binding = 0) uniform PixelUniforms
+{
+    vec4 u_texture_type;
+    vec4 u_texel_size;
+    vec4 u_yuv_offset;
+    vec4 u_yuv_r_coeff;
+    vec4 u_yuv_g_coeff;
+    vec4 u_yuv_b_coeff;
+};
+
+vec4 sample_rgba()
+{
+    return texture(u_texture0, v_texcoord);
+}
+
+vec4 palette_color(float index)
+{
+    float x = (floor((index * 255.0) + 0.5) + 0.5) / 256.0;
+    return texture(u_texture1, vec2(x, 0.5));
+}
+
+vec4 sample_index8_nearest()
+{
+    return palette_color(texture(u_texture0, v_texcoord).r);
+}
+
+vec4 sample_index8_linear()
+{
+    vec2 scaled = (v_texcoord / u_texel_size.xy) - vec2(0.5);
+    vec2 base = floor(scaled);
+    vec2 frac = scaled - base;
+    vec2 texcoord00 = (base + vec2(0.5)) * u_texel_size.xy;
+    vec2 texcoord10 = texcoord00 + vec2(u_texel_size.x, 0.0);
+    vec2 texcoord01 = texcoord00 + vec2(0.0, u_texel_size.y);
+    vec2 texcoord11 = texcoord00 + u_texel_size.xy;
+    vec4 c00 = palette_color(texture(u_texture0, texcoord00).r);
+    vec4 c10 = palette_color(texture(u_texture0, texcoord10).r);
+    vec4 c01 = palette_color(texture(u_texture0, texcoord01).r);
+    vec4 c11 = palette_color(texture(u_texture0, texcoord11).r);
+    return mix(mix(c00, c10, frac.x), mix(c01, c11, frac.x), frac.y);
+}
+
+vec4 sample_index8_pixelart()
+{
+    vec2 pixelCoord = v_texcoord / u_texel_size.xy;
+    vec2 nearestTexel = floor(pixelCoord + 0.5);
+    vec2 delta = pixelCoord - nearestTexel;
+    vec2 filtered = nearestTexel;
+    vec2 clampDelta = clamp(delta, -0.5, 0.5);
+    float ddx_x = length(vec2(dFdx(pixelCoord.x), dFdy(pixelCoord.x)));
+    float ddx_y = length(vec2(dFdx(pixelCoord.y), dFdy(pixelCoord.y)));
+
+    if (ddx_x > 0.0) {
+        filtered.x += clamp(delta.x / ddx_x, -0.5, 0.5);
+    } else {
+        filtered.x += clampDelta.x;
+    }
+    if (ddx_y > 0.0) {
+        filtered.y += clamp(delta.y / ddx_y, -0.5, 0.5);
+    } else {
+        filtered.y += clampDelta.y;
+    }
+
+    return palette_color(texture(u_texture0, filtered * u_texel_size.xy).r);
+}
+
+vec4 sample_yuv3()
+{
+    float y = texture(u_texture0, v_texcoord).r;
+    float u = texture(u_texture1, v_texcoord).r;
+    float v = texture(u_texture2, v_texcoord).r;
+    return vec4(dot(vec4(y, u, v, 1.0), u_yuv_r_coeff),
+                dot(vec4(y, u, v, 1.0), u_yuv_g_coeff),
+                dot(vec4(y, u, v, 1.0), u_yuv_b_coeff),
+                1.0) + u_yuv_offset;
+}
+
+vec4 sample_nv()
+{
+    float y = texture(u_texture0, v_texcoord).r;
+    vec2 uv = texture(u_texture1, v_texcoord).rg;
+    return vec4(dot(vec4(y, uv.x, uv.y, 1.0), u_yuv_r_coeff),
+                dot(vec4(y, uv.x, uv.y, 1.0), u_yuv_g_coeff),
+                dot(vec4(y, uv.x, uv.y, 1.0), u_yuv_b_coeff),
+                1.0) + u_yuv_offset;
+}
+
+void main()
+{
+    vec4 sampled = vec4(1.0);
+
+    if (u_texture_type.x < 0.5) {
+        sampled = vec4(1.0);
+    } else if (u_texture_type.x < 1.5) {
+        sampled = sample_rgba();
+    } else if (u_texture_type.x < 2.5) {
+        float lod = max(length(vec2(dFdx(v_texcoord.x / u_texel_size.x), dFdy(v_texcoord.x / u_texel_size.x))),
+                        length(vec2(dFdx(v_texcoord.y / u_texel_size.y), dFdy(v_texcoord.y / u_texel_size.y))));
+        if (lod <= 1.0) {
+            sampled = sample_index8_nearest();
+        } else if (lod < 2.0) {
+            sampled = sample_index8_pixelart();
+        } else {
+            sampled = sample_index8_linear();
+        }
+    } else if (u_texture_type.x < 3.5) {
+        sampled = sample_yuv3();
+    } else if (u_texture_type.x < 5.5) {
+        sampled = sample_nv();
+    }
+
+    out_color = sampled * v_color;
+}

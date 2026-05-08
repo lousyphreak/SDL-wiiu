@@ -3627,11 +3627,47 @@ elseif(N3DS)
 elseif(WIIU)
   if(SDL_VIDEO)
     set(SDL_VIDEO_DRIVER_WIIU 1)
+    if(SDL_RENDER)
+      set(SDL_VIDEO_RENDER_WIIU 1)
+    endif()
     sdl_glob_sources(
       "${SDL3_SOURCE_DIR}/src/video/wiiu/*.c"
       "${SDL3_SOURCE_DIR}/src/video/wiiu/*.h"
     )
     set(HAVE_SDL_VIDEO TRUE)
+  endif()
+
+  if(SDL_RENDER)
+    include(dkp-embedded-binary)
+
+    set(SDL_WIIU_SHADER_COMPILER "${SDL3_SOURCE_DIR}/../bin/glslcompiler.elf"
+      CACHE FILEPATH "Path to the CafeGLSL shader compiler for SDL Wii U shaders")
+    get_filename_component(SDL_WIIU_SHADER_COMPILER "${SDL_WIIU_SHADER_COMPILER}" ABSOLUTE)
+    if(NOT EXISTS "${SDL_WIIU_SHADER_COMPILER}")
+      message(FATAL_ERROR "Missing SDL_WIIU_SHADER_COMPILER: ${SDL_WIIU_SHADER_COMPILER}")
+    endif()
+
+    set(SDL_WIIU_RENDER_VERTEX_SHADER "${SDL3_SOURCE_DIR}/src/render/wiiu/SDL_wiiurender.vs")
+    set(SDL_WIIU_RENDER_PIXEL_SHADER "${SDL3_SOURCE_DIR}/src/render/wiiu/SDL_wiiurender.ps")
+    set(SDL_WIIU_RENDER_GSH "${SDL3_BINARY_DIR}/src/render/wiiu/SDL_wiiurender_shader.gsh")
+
+    add_custom_command(
+      OUTPUT "${SDL_WIIU_RENDER_GSH}"
+      COMMAND "${CMAKE_COMMAND}" -E make_directory "${SDL3_BINARY_DIR}/src/render/wiiu"
+      COMMAND "${SDL_WIIU_SHADER_COMPILER}"
+              -vs "${SDL_WIIU_RENDER_VERTEX_SHADER}"
+              -ps "${SDL_WIIU_RENDER_PIXEL_SHADER}"
+              -o "${SDL_WIIU_RENDER_GSH}"
+      DEPENDS
+        "${SDL_WIIU_RENDER_VERTEX_SHADER}"
+        "${SDL_WIIU_RENDER_PIXEL_SHADER}"
+        "${SDL_WIIU_SHADER_COMPILER}"
+      COMMENT "Compiling SDL Wii U renderer shader"
+      VERBATIM)
+
+    add_custom_target(SDL3-wiiu-render-gsh DEPENDS "${SDL_WIIU_RENDER_GSH}")
+    dkp_set_target_file(SDL3-wiiu-render-gsh "${SDL_WIIU_RENDER_GSH}")
+    dkp_add_embedded_binary_library(SDL3-wiiu-render-shaders SDL3-wiiu-render-gsh)
   endif()
 
   sdl_glob_sources(
@@ -4432,6 +4468,13 @@ if(SDL_SHARED)
       "$<BUILD_INTERFACE:${SDL3_SOURCE_DIR}/src>"
   )
   target_link_libraries(SDL3-shared PUBLIC $<TARGET_NAME:SDL3::Headers>)
+  if(TARGET SDL3-wiiu-render-shaders)
+    target_include_directories(SDL3-shared PRIVATE
+      "$<BUILD_INTERFACE:${SDL3_BINARY_DIR}/src/render/wiiu>"
+      "$<BUILD_INTERFACE:${SDL3_BINARY_DIR}/.dkp-generated/SDL3-wiiu-render-shaders>"
+    )
+    target_sources(SDL3-shared PRIVATE $<TARGET_OBJECTS:SDL3-wiiu-render-shaders>)
+  endif()
   if(MINGW OR CYGWIN)
     target_link_options(SDL3-shared PRIVATE -static-libgcc)
   endif()
@@ -4461,6 +4504,13 @@ if(SDL_STATIC)
       "$<BUILD_INTERFACE:${SDL3_SOURCE_DIR}/src>"
   )
   target_link_libraries(SDL3-static PUBLIC $<TARGET_NAME:SDL3::Headers>)
+  if(TARGET SDL3-wiiu-render-shaders)
+    target_include_directories(SDL3-static PRIVATE
+      "$<BUILD_INTERFACE:${SDL3_BINARY_DIR}/src/render/wiiu>"
+      "$<BUILD_INTERFACE:${SDL3_BINARY_DIR}/.dkp-generated/SDL3-wiiu-render-shaders>"
+    )
+    target_sources(SDL3-static PRIVATE $<TARGET_OBJECTS:SDL3-wiiu-render-shaders>)
+  endif()
   # Use `Compatible Interface Properties` to:
   # - allow consumers to enforce a shared/static library
   # - block linking to SDL libraries of different major version
