@@ -48,6 +48,7 @@
 
 #ifdef SDL_PLATFORM_WIIU
 #include "../core/wiiu/SDL_wiiulifecycle.h"
+#include "../core/wiiu/SDL_wiiulog.h"
 #endif
 
 #ifdef SDL_PLATFORM_UNIX
@@ -1549,6 +1550,7 @@ static void SDL_PumpEventsInternal(bool push_sentinel)
 #ifdef SDL_PLATFORM_WIIU
     // ProcUI lifecycle handling is independent of the video subsystem.
     SDL_WIIU_PumpLifecycle();
+    SDL_WIIU_PumpLog();
 #endif
 
 #ifdef SDL_PLATFORM_ANDROID

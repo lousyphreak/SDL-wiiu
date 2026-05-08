@@ -28,6 +28,10 @@
 #include "core/ngage/SDL_ngage.h"
 #endif
 
+#ifdef SDL_PLATFORM_WIIU
+#include "core/wiiu/SDL_wiiulog.h"
+#endif
+
 // Simple log messages in SDL
 
 #include "SDL_log_c.h"
@@ -155,6 +159,10 @@ void SDL_InitLog(void)
     SDL_log_lock = SDL_CreateMutex();
     SDL_log_function_lock = SDL_CreateMutex();
 
+#ifdef SDL_PLATFORM_WIIU
+    (void)SDL_WIIU_InitLog();
+#endif
+
     SDL_AddHintCallback(SDL_HINT_LOGGING, SDL_LoggingChanged, NULL);
 
     SDL_SetInitialized(&SDL_log_init, true);
@@ -170,6 +178,10 @@ void SDL_QuitLog(void)
 
     CleanupLogPriorities();
     CleanupLogPrefixes();
+
+#ifdef SDL_PLATFORM_WIIU
+    SDL_WIIU_QuitLog();
+#endif
 
     if (SDL_log_lock) {
         SDL_DestroyMutex(SDL_log_lock);
@@ -419,13 +431,20 @@ void SDL_ResetLogPriorities(void)
         }
 
         if (SDL_log_default_priority == SDL_LOG_PRIORITY_INVALID) {
+#ifdef SDL_PLATFORM_WIIU
+            SDL_log_default_priority = SDL_LOG_PRIORITY_TRACE;
+#else
             SDL_log_default_priority = SDL_LOG_PRIORITY_ERROR;
+#endif
         }
         for (int i = 0; i < SDL_arraysize(SDL_log_priorities); ++i) {
             if (SDL_log_priorities[i] != SDL_LOG_PRIORITY_INVALID) {
                 continue;
             }
 
+#ifdef SDL_PLATFORM_WIIU
+            SDL_log_priorities[i] = SDL_LOG_PRIORITY_TRACE;
+#else
             switch (i) {
             case SDL_LOG_CATEGORY_APPLICATION:
                 if (debug) {
@@ -448,6 +467,7 @@ void SDL_ResetLogPriorities(void)
                 }
                 break;
             }
+#endif
         }
     }
     SDL_UnlockMutex(SDL_log_lock);
@@ -783,6 +803,25 @@ static void SDLCALL SDL_LogOutput(void *userdata, int category, SDL_LogPriority 
         #elif defined(SDL_PLATFORM_OPENHARMONY)
         OH_LOG_Print(LOG_APP, SDL_openharmony_priority[priority], LOG_DOMAIN, tag, "%{public}s", message);
         #endif
+    }
+#elif defined(SDL_PLATFORM_WIIU)
+    {
+        char *output;
+        size_t length;
+        bool isstack;
+        const char *priority_name = ((priority > SDL_LOG_PRIORITY_INVALID) && (priority < SDL_LOG_PRIORITY_COUNT)) ? SDL_priority_names[priority] : "UNKNOWN";
+        const char *category_name = (category < SDL_LOG_CATEGORY_RESERVED2) ? SDL_category_names[category] :
+                                    ((category < SDL_LOG_CATEGORY_CUSTOM) ? "RESERVED" : "CUSTOM");
+
+        length = SDL_strlen(priority_name) + SDL_strlen(category_name) + SDL_strlen(message) + 8;
+        output = SDL_small_alloc(char, length, &isstack);
+        if (!output) {
+            return;
+        }
+
+        (void)SDL_snprintf(output, length, "[%s][%s] %s", priority_name, category_name, message);
+        SDL_WIIU_LogOutput(output);
+        SDL_small_free(output, isstack);
     }
 #elif defined(SDL_PLATFORM_APPLE) && (defined(SDL_VIDEO_DRIVER_COCOA) || defined(SDL_VIDEO_DRIVER_UIKIT))
     /* Technically we don't need Cocoa/UIKit, but that's where this function is defined for now.
