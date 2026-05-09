@@ -3625,6 +3625,15 @@ elseif(N3DS)
   )
 
 elseif(WIIU)
+  if(SDL_AUDIO)
+    set(SDL_AUDIO_DRIVER_WIIU 1)
+    sdl_glob_sources(
+      "${SDL3_SOURCE_DIR}/src/audio/wiiu/*.c"
+      "${SDL3_SOURCE_DIR}/src/audio/wiiu/*.h"
+    )
+    set(HAVE_SDL_AUDIO TRUE)
+  endif()
+
   if(SDL_JOYSTICK)
     set(SDL_JOYSTICK_WIIU 1)
     sdl_glob_sources("${SDL3_SOURCE_DIR}/src/joystick/wiiu/*.c")

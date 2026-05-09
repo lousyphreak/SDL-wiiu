@@ -405,6 +405,7 @@ extern AudioBootStrap VITAAUD_bootstrap;
 extern AudioBootStrap N3DSAUDIO_bootstrap;
 extern AudioBootStrap NGAGEAUDIO_bootstrap;
 extern AudioBootStrap EMSCRIPTENAUDIO_bootstrap;
+extern AudioBootStrap WIIUAUDIO_bootstrap;
 extern AudioBootStrap QSAAUDIO_bootstrap;
 extern AudioBootStrap DOSSOUNDBLASTER_bootstrap;
 extern AudioBootStrap OHAUDIO_bootstrap;
