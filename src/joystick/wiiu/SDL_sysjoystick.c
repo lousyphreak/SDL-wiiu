@@ -218,6 +218,40 @@ static const char *SDL_WIIU_GetDeviceNameForFamily(WIIUDeviceFamily family)
     }
 }
 
+static WPADDataFormat SDL_WIIU_GetDataFormatForFamily(WIIUDeviceFamily family)
+{
+    switch (family) {
+    case WIIU_DEVICE_FAMILY_PRO:
+        return WPAD_FMT_PRO_CONTROLLER;
+    case WIIU_DEVICE_FAMILY_CLASSIC:
+        return WPAD_FMT_CLASSIC;
+    default:
+        return WPAD_FMT_CORE;
+    }
+}
+
+static bool SDL_WIIU_EnsureKPADChannelConfigured(int channel, WIIUDeviceFamily family)
+{
+    const WPADChan wpad_channel = (WPADChan)channel;
+    const KPADChan kpad_channel = (KPADChan)channel;
+    const WPADDataFormat desired_format = SDL_WIIU_GetDataFormatForFamily(family);
+    const WPADDataFormat current_format = WPADGetDataFormat(wpad_channel);
+    const WPADError format_error = (current_format == desired_format) ?
+        WPAD_ERROR_NONE :
+        WPADSetDataFormat(wpad_channel, desired_format);
+
+    KPADSetButtonProcMode(kpad_channel, KPAD_BUTTON_PROC_MODE_TIGHT);
+
+    if (format_error != WPAD_ERROR_NONE && format_error != WPAD_ERROR_NOT_READY) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_INPUT,
+                    "WiiU joystick: failed to set data format %d on channel %d (error %d)",
+                    (int)desired_format, channel, (int)format_error);
+        return false;
+    }
+
+    return WPADGetDataFormat(wpad_channel) == desired_format;
+}
+
 static int SDL_WIIU_GetButtonCountForFamily(WIIUDeviceFamily family)
 {
     switch (family) {
@@ -507,6 +541,10 @@ static void SDL_WIIU_SyncKPADDevices(void)
             continue;
         }
 
+        if (!SDL_WIIU_EnsureKPADChannelConfigured(channel, family)) {
+            continue;
+        }
+
         if (index >= 0) {
             const WIIUDeviceInfo *device = &SDL_WIIU_devices[index];
             if (device->family == family && device->extension == extension) {
@@ -756,8 +794,14 @@ static void SDL_WIIU_UpdateKPAD(SDL_Joystick *joystick, joystick_hwdata *hwdata)
     KPADError error = KPAD_ERROR_OK;
     const Uint32 result = KPADReadEx((KPADChan)hwdata->channel, &status, 1, &error);
     const Uint64 timestamp = SDL_GetTicksNS();
+    const WPADDataFormat expected_format = SDL_WIIU_GetDataFormatForFamily(hwdata->family);
 
     if (result == 0 || error != KPAD_ERROR_OK || status.error != WPAD_ERROR_NONE) {
+        return;
+    }
+
+    if (status.format != expected_format) {
+        SDL_WIIU_EnsureKPADChannelConfigured(hwdata->channel, hwdata->family);
         return;
     }
 
@@ -872,22 +916,26 @@ static bool WIIU_JoystickGetGamepadMapping(int device_index, SDL_GamepadMapping 
     out->lefty = (SDL_InputMapping){ EMappingKind_Axis, WIIU_AXIS_LEFTY };
     out->rightx = (SDL_InputMapping){ EMappingKind_Axis, WIIU_AXIS_RIGHTX };
     out->righty = (SDL_InputMapping){ EMappingKind_Axis, WIIU_AXIS_RIGHTY };
-    out->lefttrigger = (SDL_InputMapping){ EMappingKind_Axis, WIIU_AXIS_LEFT_TRIGGER };
-    out->righttrigger = (SDL_InputMapping){ EMappingKind_Axis, WIIU_AXIS_RIGHT_TRIGGER };
     out->touchpad = (SDL_InputMapping){ EMappingKind_None, 255 };
 
     switch (device->family) {
     case WIIU_DEVICE_FAMILY_DRC:
+        out->lefttrigger = (SDL_InputMapping){ EMappingKind_Axis, WIIU_AXIS_LEFT_TRIGGER };
+        out->righttrigger = (SDL_InputMapping){ EMappingKind_Axis, WIIU_AXIS_RIGHT_TRIGGER };
         out->leftstick = (SDL_InputMapping){ EMappingKind_Button, WIIU_BUTTON_STICK_L };
         out->rightstick = (SDL_InputMapping){ EMappingKind_Button, WIIU_BUTTON_STICK_R };
         out->misc1 = (SDL_InputMapping){ EMappingKind_Button, WIIU_BUTTON_MISC1 };
         out->misc2 = (SDL_InputMapping){ EMappingKind_Button, WIIU_BUTTON_MISC2 };
         return true;
     case WIIU_DEVICE_FAMILY_PRO:
+        out->lefttrigger = (SDL_InputMapping){ EMappingKind_Button, WIIU_BUTTON_ZL };
+        out->righttrigger = (SDL_InputMapping){ EMappingKind_Button, WIIU_BUTTON_ZR };
         out->leftstick = (SDL_InputMapping){ EMappingKind_Button, WIIU_BUTTON_STICK_L };
         out->rightstick = (SDL_InputMapping){ EMappingKind_Button, WIIU_BUTTON_STICK_R };
         return true;
     case WIIU_DEVICE_FAMILY_CLASSIC:
+        out->lefttrigger = (SDL_InputMapping){ EMappingKind_Button, WIIU_BUTTON_ZL };
+        out->righttrigger = (SDL_InputMapping){ EMappingKind_Button, WIIU_BUTTON_ZR };
         out->leftstick = (SDL_InputMapping){ EMappingKind_None, 255 };
         out->rightstick = (SDL_InputMapping){ EMappingKind_None, 255 };
         return true;
