@@ -93,6 +93,7 @@ struct SDL_VideoData
     bool foreground_ready;
     bool vpad_initialized;
     bool keyboard_initialized;
+    bool mouse_initialized;
     bool drc_connected;
     Uint32 foreground_generation;
     SDL_WiiUScanTarget tv;
@@ -140,6 +141,11 @@ extern void SDL_WIIU_InitTouch(void);
 extern void SDL_WIIU_QuitTouch(void);
 extern void SDL_WIIU_PollTouch(SDL_VideoDevice *_this);
 extern void SDL_WIIU_SuspendTouch(void);
+
+extern bool SDL_WIIU_InitMouse(SDL_VideoDevice *_this);
+extern void SDL_WIIU_QuitMouse(void);
+extern void SDL_WIIU_PollMouse(SDL_VideoDevice *_this);
+extern void SDL_WIIU_SuspendMouse(void);
 
 extern bool SDL_WIIU_InitKeyboard(SDL_VideoDevice *_this);
 extern void SDL_WIIU_QuitKeyboard(void);

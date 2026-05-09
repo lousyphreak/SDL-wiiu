@@ -25,6 +25,7 @@
 #include "SDL_wiiuvideo.h"
 
 #include "../../core/wiiu/SDL_wiiudrc.h"
+#include "../../core/wiiu/SDL_wiiukpad.h"
 #include "../../core/wiiu/SDL_wiiulifecycle.h"
 #include "../../events/SDL_keyboard_c.h"
 
@@ -828,6 +829,9 @@ static void SDL_WIIU_ForegroundAcquired(void *userdata)
     if (driverdata->foreground_generation == 0) {
         driverdata->foreground_generation = 1;
     }
+    if (!SDL_WIIU_KPADForegroundAcquired()) {
+        SDL_LogError(SDL_LOG_CATEGORY_INPUT, "WiiU video: failed to restart KPAD runtime after foreground reacquire");
+    }
     SDL_WIIU_JoystickForegroundAcquired();
     SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO,
                 "WiiU video: foreground acquire complete (generation=%u, drc_connected=%d, tv_buffer=%p, drc_buffer=%p, outputs_pending=1)",
@@ -847,7 +851,9 @@ static void SDL_WIIU_ForegroundReleased(void *userdata)
                 driverdata->foreground_ready ? 1 : 0,
                 driverdata->drc_connected ? 1 : 0);
     SDL_ResetKeyboard();
+    SDL_WIIU_SuspendMouse();
     SDL_WIIU_SuspendTouch();
+    SDL_WIIU_KPADForegroundReleased();
     SDL_WIIU_JoystickForegroundReleased();
 
     if (!driverdata->foreground_ready && !driverdata->foreground_heap && !driverdata->mem1_heap) {
@@ -927,6 +933,7 @@ static bool SDL_WIIU_VideoInit(SDL_VideoDevice *_this)
     SDL_WIIU_SetLifecycleCallbacks(SDL_WIIU_ForegroundAcquired, SDL_WIIU_ForegroundReleased, _this);
     SDL_WIIU_ForegroundAcquired(_this);
     SDL_WIIU_InitTouch();
+    driverdata->mouse_initialized = SDL_WIIU_InitMouse(_this);
     driverdata->keyboard_initialized = SDL_WIIU_InitKeyboard(_this);
 
     return true;
@@ -959,6 +966,10 @@ static void SDL_WIIU_VideoQuit(SDL_VideoDevice *_this)
     SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO, "WiiU video: running foreground-owned video shutdown");
     SDL_WIIU_QuitFramebufferRenderer(_this);
     SDL_WIIU_QuitKeyboard();
+    if (driverdata->mouse_initialized) {
+        SDL_WIIU_QuitMouse();
+        driverdata->mouse_initialized = false;
+    }
     SDL_WIIU_QuitTouch();
 
     if (driverdata->vpad_initialized) {

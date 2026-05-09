@@ -25,15 +25,14 @@
 #include "../SDL_sysjoystick.h"
 #include "../SDL_joystick_c.h"
 #include "../../core/wiiu/SDL_wiiudrc.h"
+#include "../../core/wiiu/SDL_wiiukpad.h"
 #include "../../core/wiiu/SDL_wiiulifecycle.h"
-
-#include <padscore/kpad.h>
 
 #define WIIU_DRC_NAME "Nintendo Wii U GamePad"
 #define WIIU_PRO_NAME "Nintendo Wii U Pro Controller"
 #define WIIU_CLASSIC_NAME "Nintendo Wii Remote with Classic Controller"
-
-#define WIIU_MAX_KPAD_CHANNELS 7
+#define WIIU_REMOTE_NAME "Nintendo Wii Remote"
+#define WIIU_NUNCHUK_NAME "Nintendo Wii Remote + Nunchuk"
 #define WIIU_MAX_DEVICES (1 + WIIU_MAX_KPAD_CHANNELS)
 
 typedef enum WIIUDeviceSource
@@ -47,6 +46,8 @@ typedef enum WIIUDeviceFamily
     WIIU_DEVICE_FAMILY_NONE,
     WIIU_DEVICE_FAMILY_PENDING,
     WIIU_DEVICE_FAMILY_DRC,
+    WIIU_DEVICE_FAMILY_WIIMOTE,
+    WIIU_DEVICE_FAMILY_NUNCHUK,
     WIIU_DEVICE_FAMILY_PRO,
     WIIU_DEVICE_FAMILY_CLASSIC
 } WIIUDeviceFamily;
@@ -83,6 +84,10 @@ enum
     WIIU_BUTTON_STICK_L,
     WIIU_BUTTON_MISC1,
     WIIU_BUTTON_MISC2,
+    WIIU_BUTTON_ONE,
+    WIIU_BUTTON_TWO,
+    WIIU_BUTTON_C,
+    WIIU_BUTTON_Z,
     WIIU_BUTTON_COUNT
 };
 
@@ -127,11 +132,11 @@ static bool SDL_WIIU_InitJoystickRuntime(void)
         return false;
     }
 
-    WPADInit();
-    KPADInit();
-    KPADSetMaxControllers(WIIU_MAX_KPAD_CHANNELS);
-    WPADEnableWiiRemote(TRUE);
-    WPADEnableURCC(TRUE);
+    if (!SDL_WIIU_InitKPAD()) {
+        SDL_WIIU_QuitDRC();
+        return false;
+    }
+
     SDL_WIIU_joystick_runtime_ready = true;
     return true;
 }
@@ -142,8 +147,7 @@ static void SDL_WIIU_ShutdownJoystickRuntime(void)
         return;
     }
 
-    KPADShutdown();
-    WPADShutdown();
+    SDL_WIIU_QuitKPAD();
     SDL_WIIU_QuitDRC();
     SDL_WIIU_joystick_runtime_ready = false;
 }
@@ -209,6 +213,10 @@ static const char *SDL_WIIU_GetDeviceNameForFamily(WIIUDeviceFamily family)
     switch (family) {
     case WIIU_DEVICE_FAMILY_DRC:
         return WIIU_DRC_NAME;
+    case WIIU_DEVICE_FAMILY_WIIMOTE:
+        return WIIU_REMOTE_NAME;
+    case WIIU_DEVICE_FAMILY_NUNCHUK:
+        return WIIU_NUNCHUK_NAME;
     case WIIU_DEVICE_FAMILY_PRO:
         return WIIU_PRO_NAME;
     case WIIU_DEVICE_FAMILY_CLASSIC:
@@ -221,6 +229,10 @@ static const char *SDL_WIIU_GetDeviceNameForFamily(WIIUDeviceFamily family)
 static WPADDataFormat SDL_WIIU_GetDataFormatForFamily(WIIUDeviceFamily family)
 {
     switch (family) {
+    case WIIU_DEVICE_FAMILY_WIIMOTE:
+        return WPAD_FMT_CORE_ACC_DPD;
+    case WIIU_DEVICE_FAMILY_NUNCHUK:
+        return WPAD_FMT_NUNCHUK_ACC_DPD;
     case WIIU_DEVICE_FAMILY_PRO:
         return WPAD_FMT_PRO_CONTROLLER;
     case WIIU_DEVICE_FAMILY_CLASSIC:
@@ -230,33 +242,42 @@ static WPADDataFormat SDL_WIIU_GetDataFormatForFamily(WIIUDeviceFamily family)
     }
 }
 
+static bool SDL_WIIU_FamilyUsesPointer(WIIUDeviceFamily family)
+{
+    return family == WIIU_DEVICE_FAMILY_WIIMOTE ||
+           family == WIIU_DEVICE_FAMILY_NUNCHUK;
+}
+
 static bool SDL_WIIU_EnsureKPADChannelConfigured(int channel, WIIUDeviceFamily family)
 {
-    const WPADChan wpad_channel = (WPADChan)channel;
-    const KPADChan kpad_channel = (KPADChan)channel;
     const WPADDataFormat desired_format = SDL_WIIU_GetDataFormatForFamily(family);
-    const WPADDataFormat current_format = WPADGetDataFormat(wpad_channel);
-    const WPADError format_error = (current_format == desired_format) ?
-        WPAD_ERROR_NONE :
-        WPADSetDataFormat(wpad_channel, desired_format);
 
-    KPADSetButtonProcMode(kpad_channel, KPAD_BUTTON_PROC_MODE_TIGHT);
+    return SDL_WIIU_EnsureKPADDataFormat(channel, desired_format, SDL_WIIU_FamilyUsesPointer(family));
+}
 
-    if (format_error != WPAD_ERROR_NONE && format_error != WPAD_ERROR_NOT_READY) {
-        SDL_LogWarn(SDL_LOG_CATEGORY_INPUT,
-                    "WiiU joystick: failed to set data format %d on channel %d (error %d)",
-                    (int)desired_format, channel, (int)format_error);
-        return false;
+static int SDL_WIIU_GetAxisCountForFamily(WIIUDeviceFamily family)
+{
+    switch (family) {
+    case WIIU_DEVICE_FAMILY_DRC:
+    case WIIU_DEVICE_FAMILY_PRO:
+    case WIIU_DEVICE_FAMILY_CLASSIC:
+        return WIIU_AXIS_COUNT;
+    case WIIU_DEVICE_FAMILY_NUNCHUK:
+        return 2;
+    default:
+        return 0;
     }
-
-    return WPADGetDataFormat(wpad_channel) == desired_format;
 }
 
 static int SDL_WIIU_GetButtonCountForFamily(WIIUDeviceFamily family)
 {
     switch (family) {
     case WIIU_DEVICE_FAMILY_DRC:
-        return WIIU_BUTTON_COUNT;
+        return WIIU_BUTTON_MISC2 + 1;
+    case WIIU_DEVICE_FAMILY_WIIMOTE:
+        return WIIU_BUTTON_TWO + 1;
+    case WIIU_DEVICE_FAMILY_NUNCHUK:
+        return WIIU_BUTTON_Z + 1;
     case WIIU_DEVICE_FAMILY_PRO:
         return WIIU_BUTTON_STICK_L + 1;
     case WIIU_DEVICE_FAMILY_CLASSIC:
@@ -325,7 +346,7 @@ static void SDL_WIIU_SendAxes(SDL_Joystick *joystick, joystick_hwdata *hwdata, U
 {
     int i;
 
-    for (i = 0; i < WIIU_AXIS_COUNT; ++i) {
+    for (i = 0; i < joystick->naxes; ++i) {
         if (axes[i] != hwdata->axes[i]) {
             SDL_SendJoystickAxis(timestamp, joystick, (Uint8)i, axes[i]);
             hwdata->axes[i] = axes[i];
@@ -432,9 +453,53 @@ static Uint32 SDL_WIIU_GetClassicButtons(const KPADStatus *status)
     return buttons;
 }
 
+static Uint32 SDL_WIIU_GetWiimoteButtons(const KPADStatus *status)
+{
+    const Uint32 hold = status->hold;
+    Uint32 buttons = 0;
+
+    SDL_WIIU_SetButton(&buttons, WIIU_BUTTON_A, (hold & WPAD_BUTTON_A) != 0);
+    SDL_WIIU_SetButton(&buttons, WIIU_BUTTON_B, (hold & WPAD_BUTTON_B) != 0);
+    SDL_WIIU_SetButton(&buttons, WIIU_BUTTON_LEFT, (hold & WPAD_BUTTON_LEFT) != 0);
+    SDL_WIIU_SetButton(&buttons, WIIU_BUTTON_RIGHT, (hold & WPAD_BUTTON_RIGHT) != 0);
+    SDL_WIIU_SetButton(&buttons, WIIU_BUTTON_UP, (hold & WPAD_BUTTON_UP) != 0);
+    SDL_WIIU_SetButton(&buttons, WIIU_BUTTON_DOWN, (hold & WPAD_BUTTON_DOWN) != 0);
+    SDL_WIIU_SetButton(&buttons, WIIU_BUTTON_PLUS, (hold & WPAD_BUTTON_PLUS) != 0);
+    SDL_WIIU_SetButton(&buttons, WIIU_BUTTON_MINUS, (hold & WPAD_BUTTON_MINUS) != 0);
+    SDL_WIIU_SetButton(&buttons, WIIU_BUTTON_HOME, (hold & WPAD_BUTTON_HOME) != 0);
+    SDL_WIIU_SetButton(&buttons, WIIU_BUTTON_ONE, (hold & WPAD_BUTTON_1) != 0);
+    SDL_WIIU_SetButton(&buttons, WIIU_BUTTON_TWO, (hold & WPAD_BUTTON_2) != 0);
+    return buttons;
+}
+
+static Uint32 SDL_WIIU_GetNunchukButtons(const KPADStatus *status)
+{
+    const Uint32 hold = status->hold | status->nunchuk.hold;
+    Uint32 buttons = 0;
+
+    SDL_WIIU_SetButton(&buttons, WIIU_BUTTON_A, (hold & WPAD_BUTTON_A) != 0);
+    SDL_WIIU_SetButton(&buttons, WIIU_BUTTON_B, (hold & WPAD_BUTTON_B) != 0);
+    SDL_WIIU_SetButton(&buttons, WIIU_BUTTON_LEFT, (hold & WPAD_BUTTON_LEFT) != 0);
+    SDL_WIIU_SetButton(&buttons, WIIU_BUTTON_RIGHT, (hold & WPAD_BUTTON_RIGHT) != 0);
+    SDL_WIIU_SetButton(&buttons, WIIU_BUTTON_UP, (hold & WPAD_BUTTON_UP) != 0);
+    SDL_WIIU_SetButton(&buttons, WIIU_BUTTON_DOWN, (hold & WPAD_BUTTON_DOWN) != 0);
+    SDL_WIIU_SetButton(&buttons, WIIU_BUTTON_PLUS, (hold & WPAD_BUTTON_PLUS) != 0);
+    SDL_WIIU_SetButton(&buttons, WIIU_BUTTON_MINUS, (hold & WPAD_BUTTON_MINUS) != 0);
+    SDL_WIIU_SetButton(&buttons, WIIU_BUTTON_HOME, (hold & WPAD_BUTTON_HOME) != 0);
+    SDL_WIIU_SetButton(&buttons, WIIU_BUTTON_ONE, (hold & WPAD_BUTTON_1) != 0);
+    SDL_WIIU_SetButton(&buttons, WIIU_BUTTON_TWO, (hold & WPAD_BUTTON_2) != 0);
+    SDL_WIIU_SetButton(&buttons, WIIU_BUTTON_C, (hold & WPAD_BUTTON_C) != 0);
+    SDL_WIIU_SetButton(&buttons, WIIU_BUTTON_Z, (hold & WPAD_BUTTON_Z) != 0);
+    return buttons;
+}
+
 static WIIUDeviceFamily SDL_WIIU_GetKPADFamilyForExtension(WPADExtensionType extension)
 {
     switch (extension) {
+    case WPAD_EXT_CORE:
+        return WIIU_DEVICE_FAMILY_WIIMOTE;
+    case WPAD_EXT_NUNCHUK:
+        return WIIU_DEVICE_FAMILY_NUNCHUK;
     case WPAD_EXT_PRO_CONTROLLER:
         return WIIU_DEVICE_FAMILY_PRO;
     case WPAD_EXT_CLASSIC:
@@ -661,7 +726,7 @@ static bool WIIU_JoystickOpen(SDL_Joystick *joystick, int device_index)
 
     joystick->hwdata = hwdata;
     joystick->nbuttons = SDL_WIIU_GetButtonCountForFamily(device->family);
-    joystick->naxes = WIIU_AXIS_COUNT;
+    joystick->naxes = SDL_WIIU_GetAxisCountForFamily(device->family);
     joystick->nhats = 0;
     joystick->connection_state = SDL_JOYSTICK_CONNECTION_WIRELESS;
 
@@ -788,32 +853,68 @@ static void SDL_WIIU_UpdateClassic(SDL_Joystick *joystick, joystick_hwdata *hwda
     SDL_WIIU_UpdatePowerInfo(joystick, hwdata, SDL_POWERSTATE_ON_BATTERY, battery_percent);
 }
 
+static void SDL_WIIU_UpdateWiimote(SDL_Joystick *joystick, joystick_hwdata *hwdata, const KPADStatus *status, Uint64 timestamp)
+{
+    const Uint32 buttons = SDL_WIIU_GetWiimoteButtons(status);
+    const int battery_percent = SDL_WIIU_GetBatteryPercentFromLevel(WPADGetBatteryLevel((WPADChan)hwdata->channel));
+
+    SDL_WIIU_SendButtons(joystick, hwdata, timestamp, buttons);
+    joystick->connection_state = SDL_JOYSTICK_CONNECTION_WIRELESS;
+    SDL_WIIU_UpdatePowerInfo(joystick, hwdata, SDL_POWERSTATE_ON_BATTERY, battery_percent);
+}
+
+static void SDL_WIIU_UpdateNunchuk(SDL_Joystick *joystick, joystick_hwdata *hwdata, const KPADStatus *status, Uint64 timestamp)
+{
+    const Uint32 buttons = SDL_WIIU_GetNunchukButtons(status);
+    const Sint16 axes[] = {
+        SDL_WIIU_ConvertStickAxis(status->nunchuk.stick.x, false),
+        SDL_WIIU_ConvertStickAxis(status->nunchuk.stick.y, true)
+    };
+    const int battery_percent = SDL_WIIU_GetBatteryPercentFromLevel(WPADGetBatteryLevel((WPADChan)hwdata->channel));
+
+    SDL_WIIU_SendAxes(joystick, hwdata, timestamp, axes);
+    SDL_WIIU_SendButtons(joystick, hwdata, timestamp, buttons);
+    joystick->connection_state = SDL_JOYSTICK_CONNECTION_WIRELESS;
+    SDL_WIIU_UpdatePowerInfo(joystick, hwdata, SDL_POWERSTATE_ON_BATTERY, battery_percent);
+}
+
 static void SDL_WIIU_UpdateKPAD(SDL_Joystick *joystick, joystick_hwdata *hwdata)
 {
-    KPADStatus status;
-    KPADError error = KPAD_ERROR_OK;
-    const Uint32 result = KPADReadEx((KPADChan)hwdata->channel, &status, 1, &error);
-    const Uint64 timestamp = SDL_GetTicksNS();
+    const SDL_WiiUKPADState *kpad_state = SDL_WIIU_GetKPADState(hwdata->channel);
     const WPADDataFormat expected_format = SDL_WIIU_GetDataFormatForFamily(hwdata->family);
+    const KPADStatus *status;
+    const Uint64 timestamp = kpad_state ? kpad_state->timestamp_ns : SDL_GetTicksNS();
 
-    if (result == 0 || error != KPAD_ERROR_OK || status.error != WPAD_ERROR_NONE) {
+    if (!kpad_state || !kpad_state->connected || !kpad_state->has_status) {
         return;
     }
 
-    if (status.format != expected_format) {
+    status = &kpad_state->status;
+
+    if (status->format != expected_format) {
         SDL_WIIU_EnsureKPADChannelConfigured(hwdata->channel, hwdata->family);
         return;
     }
 
     switch (hwdata->family) {
+    case WIIU_DEVICE_FAMILY_WIIMOTE:
+        if (status->extensionType == WPAD_EXT_CORE) {
+            SDL_WIIU_UpdateWiimote(joystick, hwdata, status, timestamp);
+        }
+        break;
+    case WIIU_DEVICE_FAMILY_NUNCHUK:
+        if (status->extensionType == WPAD_EXT_NUNCHUK) {
+            SDL_WIIU_UpdateNunchuk(joystick, hwdata, status, timestamp);
+        }
+        break;
     case WIIU_DEVICE_FAMILY_PRO:
-        if (status.extensionType == WPAD_EXT_PRO_CONTROLLER) {
-            SDL_WIIU_UpdatePro(joystick, hwdata, &status, timestamp);
+        if (status->extensionType == WPAD_EXT_PRO_CONTROLLER) {
+            SDL_WIIU_UpdatePro(joystick, hwdata, status, timestamp);
         }
         break;
     case WIIU_DEVICE_FAMILY_CLASSIC:
-        if (status.extensionType == WPAD_EXT_CLASSIC) {
-            SDL_WIIU_UpdateClassic(joystick, hwdata, &status, timestamp);
+        if (status->extensionType == WPAD_EXT_CLASSIC) {
+            SDL_WIIU_UpdateClassic(joystick, hwdata, status, timestamp);
         }
         break;
     default:
@@ -939,6 +1040,8 @@ static bool WIIU_JoystickGetGamepadMapping(int device_index, SDL_GamepadMapping 
         out->leftstick = (SDL_InputMapping){ EMappingKind_None, 255 };
         out->rightstick = (SDL_InputMapping){ EMappingKind_None, 255 };
         return true;
+    case WIIU_DEVICE_FAMILY_WIIMOTE:
+    case WIIU_DEVICE_FAMILY_NUNCHUK:
     default:
         return false;
     }
