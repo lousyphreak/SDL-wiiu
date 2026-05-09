@@ -130,6 +130,7 @@ typedef struct WIIU_RenderData
     SDL_BlendMode blend_mode;
     bool blend_dirty;
     int vsync;
+    Uint32 logged_foreground_generation_present;
 } WIIU_RenderData;
 
 static bool WIIU_CreateRenderer(SDL_Renderer *renderer, SDL_Window *window, SDL_PropertiesID create_props);
@@ -1511,13 +1512,41 @@ static bool WIIU_RenderPresent(SDL_Renderer *renderer)
     SDL_WiiUScanTarget *drc_target = &data->video->drc;
     const bool render_tv = SDL_WIIU_GetOutputWindow(data->device, SDL_WIIU_DISPLAY_TV) == renderer->window;
     const bool render_drc = data->video->drc_connected && (SDL_WIIU_GetOutputWindow(data->device, SDL_WIIU_DISPLAY_DRC) == renderer->window);
+    const Uint32 foreground_generation = data->video->foreground_generation;
+    const bool first_present_after_acquire = (foreground_generation != 0) && (data->logged_foreground_generation_present != foreground_generation);
     SDL_Rect dstrect;
 
-    if (!data->video->foreground_ready || !SDL_WIIU_IsInForeground()) {
+    if (!SDL_WIIU_IsInForeground()) {
+        if (first_present_after_acquire) {
+            data->logged_foreground_generation_present = foreground_generation;
+            SDL_LogInfo(SDL_LOG_CATEGORY_RENDER,
+                        "WiiU render: first present after foreground acquire #%u skipped because lifecycle still reports background",
+                        (unsigned int)foreground_generation);
+        }
+        return true;
+    }
+
+    if (!data->video->foreground_ready) {
+        if (first_present_after_acquire) {
+            data->logged_foreground_generation_present = foreground_generation;
+            SDL_LogWarn(SDL_LOG_CATEGORY_RENDER,
+                        "WiiU render: first present after foreground acquire #%u skipped because foreground resources are still unavailable",
+                        (unsigned int)foreground_generation);
+        }
         return true;
     }
 
     if ((!render_tv || !tv_target->scan_buffer) && (!render_drc || !drc_target->scan_buffer)) {
+        if (first_present_after_acquire) {
+            data->logged_foreground_generation_present = foreground_generation;
+            SDL_LogWarn(SDL_LOG_CATEGORY_RENDER,
+                        "WiiU render: first present after foreground acquire #%u skipped because no scan targets are active (render_tv=%d, render_drc=%d, tv_buffer=%p, drc_buffer=%p)",
+                        (unsigned int)foreground_generation,
+                        render_tv ? 1 : 0,
+                        render_drc ? 1 : 0,
+                        tv_target->scan_buffer,
+                        drc_target->scan_buffer);
+        }
         return true;
     }
 
@@ -1546,6 +1575,16 @@ static bool WIIU_RenderPresent(SDL_Renderer *renderer)
     GX2DrawDone();
     GX2SetTVEnable(TRUE);
     GX2SetDRCEnable(data->video->drc_connected ? TRUE : FALSE);
+    if (first_present_after_acquire) {
+        data->logged_foreground_generation_present = foreground_generation;
+        SDL_LogInfo(SDL_LOG_CATEGORY_RENDER,
+                    "WiiU render: first present after foreground acquire #%u completed (render_tv=%d, render_drc=%d, tv_buffer=%p, drc_buffer=%p)",
+                    (unsigned int)foreground_generation,
+                    render_tv ? 1 : 0,
+                    render_drc ? 1 : 0,
+                    tv_target->scan_buffer,
+                    drc_target->scan_buffer);
+    }
     return true;
 }
 

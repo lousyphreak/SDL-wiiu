@@ -330,7 +330,11 @@ bool SDL_WIIU_UpdateWindowFramebuffer(SDL_VideoDevice *_this, SDL_Window *window
         return SDL_SetError("Wii U window framebuffer surface is unavailable");
     }
 
-    if (!driverdata->foreground_ready || !SDL_WIIU_IsInForeground()) {
+    if (!SDL_WIIU_IsInForeground()) {
+        return true;
+    }
+
+    if (!driverdata->foreground_ready) {
         return true;
     }
 

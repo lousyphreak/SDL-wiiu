@@ -40,6 +40,7 @@
 #include <gx2/surface.h>
 #include <gx2/swap.h>
 #include <gx2r/mem.h>
+#include <proc_ui/procui.h>
 #include <vpad/input.h>
 
 #define WIIUVID_DRIVER_NAME "wiiu"
@@ -47,6 +48,10 @@
 #define WIIU_DRC_DISPLAY_NAME "Wii U GamePad"
 #define WIIU_GX2_COMMAND_BUFFER_POOL_SIZE 0x400000
 #define WIIU_MEM1_FRAME_HEAP_TAG 0x53444C31u
+
+extern void SDL_WIIU_JoystickForegroundReleased(void);
+extern void SDL_WIIU_JoystickForegroundAcquired(void);
+
 static SDL_VideoDevice *SDL_WIIU_video_device;
 
 static void SDL_WIIU_DeleteDevice(SDL_VideoDevice *device);
@@ -761,6 +766,11 @@ static void SDL_WIIU_DestroyForegroundResources(SDL_VideoData *driverdata)
         return;
     }
 
+    SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO,
+                "WiiU video: destroying foreground resources (ready=%d, tv_buffer=%p, drc_buffer=%p)",
+                driverdata->foreground_ready ? 1 : 0,
+                driverdata->tv.scan_buffer,
+                driverdata->drc.scan_buffer);
     SDL_WIIU_ClearScanTarget(&driverdata->tv);
     SDL_WIIU_ClearScanTarget(&driverdata->drc);
     SDL_WIIU_DestroyMEM1Heap(driverdata);
@@ -772,29 +782,59 @@ static void SDL_WIIU_ForegroundAcquired(void *userdata)
 {
     SDL_VideoDevice *_this = (SDL_VideoDevice *)userdata;
     SDL_VideoData *driverdata = (SDL_VideoData *)_this->internal;
+    const SDL_WiiUDRCState *drc_state;
 
+    SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO,
+                "WiiU video: foreground acquire start (ready=%d, foreground_heap=%p, mem1_heap=%p)",
+                driverdata->foreground_ready ? 1 : 0,
+                driverdata->foreground_heap,
+                driverdata->mem1_heap);
     if (driverdata->foreground_ready || driverdata->foreground_heap || driverdata->mem1_heap) {
         SDL_WIIU_DestroyForegroundResources(driverdata);
     }
 
+    if (driverdata->gx2_initialized) {
+        GX2SetTVEnable(FALSE);
+        GX2SetDRCEnable(FALSE);
+    }
+
     if (!SDL_WIIU_InitForegroundHeap(driverdata)) {
+        SDL_LogError(SDL_LOG_CATEGORY_VIDEO, "WiiU video: failed to initialize foreground heap: %s", SDL_GetError());
         return;
     }
 
     if (!SDL_WIIU_InitMEM1Heap(driverdata)) {
+        SDL_LogError(SDL_LOG_CATEGORY_VIDEO, "WiiU video: failed to initialize MEM1 heap: %s", SDL_GetError());
         SDL_WIIU_DestroyForegroundHeap(driverdata);
         return;
     }
 
     if (!SDL_WIIU_AllocateScanTarget(driverdata, &driverdata->tv) ||
         !SDL_WIIU_AllocateScanTarget(driverdata, &driverdata->drc)) {
+        SDL_LogError(SDL_LOG_CATEGORY_VIDEO, "WiiU video: failed to allocate scan targets: %s", SDL_GetError());
         SDL_WIIU_DestroyForegroundResources(driverdata);
         return;
     }
 
-    GX2SetTVEnable(TRUE);
-    GX2SetDRCEnable(driverdata->drc_connected ? TRUE : FALSE);
+    GX2SetDRCConnectCallback(0, SDL_WIIU_DRCConnectCallback);
+    drc_state = SDL_WIIU_GetDRCState();
+    driverdata->drc_connected = (!drc_state || !drc_state->has_status) ? true : drc_state->connected;
+    SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO,
+                "WiiU video: DRC connection refresh after foreground acquire -> %s",
+                driverdata->drc_connected ? "connected" : "disconnected");
+    GX2SetSwapInterval(1);
     driverdata->foreground_ready = true;
+    ++driverdata->foreground_generation;
+    if (driverdata->foreground_generation == 0) {
+        driverdata->foreground_generation = 1;
+    }
+    SDL_WIIU_JoystickForegroundAcquired();
+    SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO,
+                "WiiU video: foreground acquire complete (generation=%u, drc_connected=%d, tv_buffer=%p, drc_buffer=%p, outputs_pending=1)",
+                (unsigned int)driverdata->foreground_generation,
+                driverdata->drc_connected ? 1 : 0,
+                driverdata->tv.scan_buffer,
+                driverdata->drc.scan_buffer);
 }
 
 static void SDL_WIIU_ForegroundReleased(void *userdata)
@@ -802,13 +842,24 @@ static void SDL_WIIU_ForegroundReleased(void *userdata)
     SDL_VideoDevice *_this = (SDL_VideoDevice *)userdata;
     SDL_VideoData *driverdata = (SDL_VideoData *)_this->internal;
 
+    SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO,
+                "WiiU video: foreground release start (ready=%d, drc_connected=%d)",
+                driverdata->foreground_ready ? 1 : 0,
+                driverdata->drc_connected ? 1 : 0);
+    SDL_ResetKeyboard();
+    SDL_WIIU_SuspendTouch();
+    SDL_WIIU_JoystickForegroundReleased();
+
     if (!driverdata->foreground_ready && !driverdata->foreground_heap && !driverdata->mem1_heap) {
         return;
     }
 
+    GX2SetDRCConnectCallback(0, NULL);
     GX2SetTVEnable(TRUE);
-    GX2SetDRCEnable(driverdata->drc_connected ? TRUE : FALSE);
+    GX2SetDRCEnable(TRUE);
     GX2DrawDone();
+    SDL_WIIU_DestroyForegroundResources(driverdata);
+    SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO, "WiiU video: foreground release complete");
 }
 
 static void SDL_WIIU_DRCConnectCallback(uint32_t drc_slot, BOOL attached)
@@ -816,14 +867,23 @@ static void SDL_WIIU_DRCConnectCallback(uint32_t drc_slot, BOOL attached)
     SDL_VideoDevice *_this = SDL_WIIU_video_device;
     SDL_VideoData *driverdata;
 
-    (void)drc_slot;
-
     if (!_this) {
+        return;
+    }
+
+    if (!attached && !SDL_WIIU_IsInForeground()) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO,
+                    "WiiU video: ignoring transient DRC disconnect while not in foreground");
         return;
     }
 
     driverdata = (SDL_VideoData *)_this->internal;
     driverdata->drc_connected = attached ? true : false;
+    SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO,
+                "WiiU video: DRC callback (slot=%u, attached=%d, foreground=%d)",
+                (unsigned int)drc_slot,
+                attached ? 1 : 0,
+                SDL_WIIU_IsInForeground() ? 1 : 0);
     if (driverdata->foreground_ready) {
         GX2SetDRCEnable(attached ? TRUE : FALSE);
     }
@@ -862,25 +922,41 @@ static bool SDL_WIIU_VideoInit(SDL_VideoDevice *_this)
         return SDL_SetError("Unable to add Wii U video displays");
     }
 
-    GX2SetSwapInterval(1);
-    GX2SetDRCConnectCallback(0, SDL_WIIU_DRCConnectCallback);
+    SDL_WIIU_video_device = _this;
+    driverdata->vpad_initialized = SDL_WIIU_InitDRC();
     SDL_WIIU_SetLifecycleCallbacks(SDL_WIIU_ForegroundAcquired, SDL_WIIU_ForegroundReleased, _this);
     SDL_WIIU_ForegroundAcquired(_this);
-
-    driverdata->vpad_initialized = SDL_WIIU_InitDRC();
     SDL_WIIU_InitTouch();
     driverdata->keyboard_initialized = SDL_WIIU_InitKeyboard(_this);
 
-    SDL_WIIU_video_device = _this;
     return true;
 }
 
 static void SDL_WIIU_VideoQuit(SDL_VideoDevice *_this)
 {
     SDL_VideoData *driverdata = (SDL_VideoData *)_this->internal;
+    const bool procui_running = ProcUIIsRunning();
+    const bool procui_foreground = !procui_running || ProcUIInForeground();
+    const bool can_use_foreground_only_shutdown = driverdata->foreground_ready && procui_foreground;
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO,
+                "WiiU video: video quit start (foreground_ready=%d, procui_running=%d, procui_foreground=%d, gx2_initialized=%d, vpad_initialized=%d)",
+                driverdata->foreground_ready ? 1 : 0,
+                procui_running ? 1 : 0,
+                procui_foreground ? 1 : 0,
+                driverdata->gx2_initialized ? 1 : 0,
+                driverdata->vpad_initialized ? 1 : 0);
 
     SDL_WIIU_video_device = NULL;
     SDL_WIIU_SetLifecycleCallbacks(NULL, NULL, NULL);
+
+    if (!can_use_foreground_only_shutdown) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO,
+                    "WiiU video: skipping foreground-only video shutdown because foreground is no longer owned during exit");
+        return;
+    }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO, "WiiU video: running foreground-owned video shutdown");
     SDL_WIIU_QuitFramebufferRenderer(_this);
     SDL_WIIU_QuitKeyboard();
     SDL_WIIU_QuitTouch();
@@ -890,10 +966,10 @@ static void SDL_WIIU_VideoQuit(SDL_VideoDevice *_this)
         driverdata->vpad_initialized = false;
     }
 
-    GX2SetDRCConnectCallback(0, NULL);
     GX2DrawDone();
     GX2SetTVEnable(FALSE);
     GX2SetDRCEnable(FALSE);
+    GX2SetDRCConnectCallback(0, NULL);
     SDL_WIIU_DestroyForegroundResources(driverdata);
 
     if (driverdata->gx2_initialized) {
@@ -906,6 +982,8 @@ static void SDL_WIIU_VideoQuit(SDL_VideoDevice *_this)
         MEMFreeToDefaultHeap(driverdata->command_buffer_pool);
         driverdata->command_buffer_pool = NULL;
     }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO, "WiiU video: video quit complete");
 }
 
 static bool SDL_WIIU_GetDisplayBounds(SDL_VideoDevice *_this, SDL_VideoDisplay *display, SDL_Rect *rect)

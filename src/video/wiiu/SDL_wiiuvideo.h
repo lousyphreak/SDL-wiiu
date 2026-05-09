@@ -94,6 +94,7 @@ struct SDL_VideoData
     bool vpad_initialized;
     bool keyboard_initialized;
     bool drc_connected;
+    Uint32 foreground_generation;
     SDL_WiiUScanTarget tv;
     SDL_WiiUScanTarget drc;
     SDL_WiiUShaderGroup blit_shader;
@@ -138,6 +139,7 @@ extern void SDL_WIIU_GetWindowPresentationSize(SDL_VideoDevice *_this, SDL_Windo
 extern void SDL_WIIU_InitTouch(void);
 extern void SDL_WIIU_QuitTouch(void);
 extern void SDL_WIIU_PollTouch(SDL_VideoDevice *_this);
+extern void SDL_WIIU_SuspendTouch(void);
 
 extern bool SDL_WIIU_InitKeyboard(SDL_VideoDevice *_this);
 extern void SDL_WIIU_QuitKeyboard(void);

@@ -24,9 +24,15 @@
 
 #include "SDL_wiiuvideo.h"
 #include "../../core/wiiu/SDL_wiiudrc.h"
+#include "../../core/wiiu/SDL_wiiulifecycle.h"
 
 void SDL_WIIU_PumpEvents(SDL_VideoDevice *_this)
 {
+    if (!SDL_WIIU_IsInForeground()) {
+        SDL_WIIU_SuspendTouch();
+        return;
+    }
+
     SDL_WIIU_BeginDRCUpdateCycle();
     SDL_WIIU_PollTouch(_this);
 }

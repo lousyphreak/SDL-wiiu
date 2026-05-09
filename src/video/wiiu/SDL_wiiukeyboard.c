@@ -24,6 +24,7 @@
 
 #include "SDL_wiiuvideo.h"
 
+#include "../../core/wiiu/SDL_wiiulifecycle.h"
 #include "../../events/SDL_keyboard_c.h"
 
 #include <nsyskbd/nsyskbd.h>
@@ -61,6 +62,10 @@ static void SDL_WIIU_KeyCallback(KBDKeyEvent *event)
 {
     SDL_KeyboardID keyboard_id = SDL_WIIU_GetKeyboardID(event->channel);
     SDL_Scancode scancode = (event->hidCode < SDL_SCANCODE_COUNT) ? (SDL_Scancode)event->hidCode : SDL_SCANCODE_UNKNOWN;
+
+    if (!SDL_WIIU_IsInForeground()) {
+        return;
+    }
 
     SDL_WIIU_AddKeyboardChannel(event->channel);
     SDL_SendKeyboardKey(0, keyboard_id, event->hidCode, scancode, event->isPressedDown ? true : false);

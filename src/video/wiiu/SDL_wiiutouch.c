@@ -25,6 +25,7 @@
 #include "SDL_wiiuvideo.h"
 
 #include "../../core/wiiu/SDL_wiiudrc.h"
+#include "../../core/wiiu/SDL_wiiulifecycle.h"
 #include "../../events/SDL_touch_c.h"
 
 #define WIIU_TOUCH_ID     1
@@ -59,6 +60,11 @@ static void SDL_WIIU_SendTouchRelease(void)
                   SDL_EVENT_FINGER_UP,
                   SDL_WIIU_touch_state.x, SDL_WIIU_touch_state.y, 0.0f);
     SDL_zero(SDL_WIIU_touch_state);
+}
+
+void SDL_WIIU_SuspendTouch(void)
+{
+    SDL_WIIU_SendTouchRelease();
 }
 
 static bool SDL_WIIU_NormalizeTouchForWindow(SDL_VideoDevice *_this, SDL_Window *window, SDL_VideoData *driverdata, const VPADTouchData *touch, float *x, float *y)

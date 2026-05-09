@@ -25,6 +25,7 @@
 #include "../SDL_sysjoystick.h"
 #include "../SDL_joystick_c.h"
 #include "../../core/wiiu/SDL_wiiudrc.h"
+#include "../../core/wiiu/SDL_wiiulifecycle.h"
 
 #include <padscore/kpad.h>
 
@@ -115,8 +116,37 @@ typedef struct joystick_hwdata
 static WIIUDeviceInfo SDL_WIIU_devices[WIIU_MAX_DEVICES];
 static int SDL_WIIU_numjoysticks;
 static SDL_JoystickID SDL_WIIU_next_instance_id;
+static bool SDL_WIIU_joystick_initialized;
+static bool SDL_WIIU_joystick_runtime_ready;
 
 static void WIIU_JoystickDetect(void);
+
+static bool SDL_WIIU_InitJoystickRuntime(void)
+{
+    if (!SDL_WIIU_InitDRC()) {
+        return false;
+    }
+
+    WPADInit();
+    KPADInit();
+    KPADSetMaxControllers(WIIU_MAX_KPAD_CHANNELS);
+    WPADEnableWiiRemote(TRUE);
+    WPADEnableURCC(TRUE);
+    SDL_WIIU_joystick_runtime_ready = true;
+    return true;
+}
+
+static void SDL_WIIU_ShutdownJoystickRuntime(void)
+{
+    if (!SDL_WIIU_joystick_runtime_ready) {
+        return;
+    }
+
+    KPADShutdown();
+    WPADShutdown();
+    SDL_WIIU_QuitDRC();
+    SDL_WIIU_joystick_runtime_ready = false;
+}
 
 static Sint16 SDL_WIIU_ConvertStickAxis(float value, bool invert)
 {
@@ -493,18 +523,13 @@ static void SDL_WIIU_SyncKPADDevices(void)
 
 static bool WIIU_JoystickInit(void)
 {
-    if (!SDL_WIIU_InitDRC()) {
+    if (!SDL_WIIU_InitJoystickRuntime()) {
         return false;
     }
 
-    WPADInit();
-    KPADInit();
-    KPADSetMaxControllers(WIIU_MAX_KPAD_CHANNELS);
-    WPADEnableWiiRemote(TRUE);
-    WPADEnableURCC(TRUE);
-
     SDL_WIIU_numjoysticks = 0;
     SDL_WIIU_next_instance_id = 1;
+    SDL_WIIU_joystick_initialized = true;
 
     WIIU_JoystickDetect();
     return true;
@@ -518,6 +543,10 @@ static int WIIU_JoystickGetCount(void)
 static void WIIU_JoystickDetect(void)
 {
     const SDL_WiiUDRCState *state = SDL_WIIU_GetDRCState();
+
+    if (!SDL_WIIU_joystick_runtime_ready || !SDL_WIIU_IsInForeground()) {
+        return;
+    }
 
     SDL_WIIU_SyncDRCDevice(state);
     SDL_WIIU_SyncKPADDevices();
@@ -756,6 +785,10 @@ static void WIIU_JoystickUpdate(SDL_Joystick *joystick)
         return;
     }
 
+    if (!SDL_WIIU_joystick_runtime_ready || !SDL_WIIU_IsInForeground()) {
+        return;
+    }
+
     if (hwdata->source == WIIU_DEVICE_SOURCE_DRC) {
         SDL_WIIU_UpdateDRC(joystick, hwdata);
     } else {
@@ -784,9 +817,33 @@ static void WIIU_JoystickClose(SDL_Joystick *joystick)
 static void WIIU_JoystickQuit(void)
 {
     SDL_WIIU_numjoysticks = 0;
-    KPADShutdown();
-    WPADShutdown();
-    SDL_WIIU_QuitDRC();
+    SDL_WIIU_ShutdownJoystickRuntime();
+    SDL_WIIU_joystick_initialized = false;
+}
+
+void SDL_WIIU_JoystickForegroundReleased(void)
+{
+    if (!SDL_WIIU_joystick_initialized) {
+        return;
+    }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_INPUT, "WiiU joystick: shutting down foreground controller runtime");
+    SDL_WIIU_ShutdownJoystickRuntime();
+}
+
+void SDL_WIIU_JoystickForegroundAcquired(void)
+{
+    if (!SDL_WIIU_joystick_initialized) {
+        return;
+    }
+
+    if (!SDL_WIIU_InitJoystickRuntime()) {
+        SDL_LogError(SDL_LOG_CATEGORY_INPUT, "WiiU joystick: failed to restart controller runtime");
+        return;
+    }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_INPUT, "WiiU joystick: restarted controller runtime after foreground reacquire");
+    WIIU_JoystickDetect();
 }
 
 static bool WIIU_JoystickGetGamepadMapping(int device_index, SDL_GamepadMapping *out)
