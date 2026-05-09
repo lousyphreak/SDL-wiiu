@@ -755,13 +755,26 @@ static bool SDL_WIIU_AllocateScanTarget(SDL_VideoData *driverdata, SDL_WiiUScanT
     return true;
 }
 
+static void SDL_WIIU_DestroyForegroundResources(SDL_VideoData *driverdata)
+{
+    if (!driverdata->foreground_ready && !driverdata->foreground_heap && !driverdata->mem1_heap) {
+        return;
+    }
+
+    SDL_WIIU_ClearScanTarget(&driverdata->tv);
+    SDL_WIIU_ClearScanTarget(&driverdata->drc);
+    SDL_WIIU_DestroyMEM1Heap(driverdata);
+    SDL_WIIU_DestroyForegroundHeap(driverdata);
+    driverdata->foreground_ready = false;
+}
+
 static void SDL_WIIU_ForegroundAcquired(void *userdata)
 {
     SDL_VideoDevice *_this = (SDL_VideoDevice *)userdata;
     SDL_VideoData *driverdata = (SDL_VideoData *)_this->internal;
 
-    if (driverdata->foreground_ready) {
-        return;
+    if (driverdata->foreground_ready || driverdata->foreground_heap || driverdata->mem1_heap) {
+        SDL_WIIU_DestroyForegroundResources(driverdata);
     }
 
     if (!SDL_WIIU_InitForegroundHeap(driverdata)) {
@@ -775,7 +788,7 @@ static void SDL_WIIU_ForegroundAcquired(void *userdata)
 
     if (!SDL_WIIU_AllocateScanTarget(driverdata, &driverdata->tv) ||
         !SDL_WIIU_AllocateScanTarget(driverdata, &driverdata->drc)) {
-        SDL_WIIU_ForegroundReleased(userdata);
+        SDL_WIIU_DestroyForegroundResources(driverdata);
         return;
     }
 
@@ -793,14 +806,9 @@ static void SDL_WIIU_ForegroundReleased(void *userdata)
         return;
     }
 
+    GX2SetTVEnable(TRUE);
+    GX2SetDRCEnable(driverdata->drc_connected ? TRUE : FALSE);
     GX2DrawDone();
-    GX2SetTVEnable(FALSE);
-    GX2SetDRCEnable(FALSE);
-    SDL_WIIU_ClearScanTarget(&driverdata->tv);
-    SDL_WIIU_ClearScanTarget(&driverdata->drc);
-    SDL_WIIU_DestroyMEM1Heap(driverdata);
-    SDL_WIIU_DestroyForegroundHeap(driverdata);
-    driverdata->foreground_ready = false;
 }
 
 static void SDL_WIIU_DRCConnectCallback(uint32_t drc_slot, BOOL attached)
@@ -883,7 +891,10 @@ static void SDL_WIIU_VideoQuit(SDL_VideoDevice *_this)
     }
 
     GX2SetDRCConnectCallback(0, NULL);
-    SDL_WIIU_ForegroundReleased(_this);
+    GX2DrawDone();
+    GX2SetTVEnable(FALSE);
+    GX2SetDRCEnable(FALSE);
+    SDL_WIIU_DestroyForegroundResources(driverdata);
 
     if (driverdata->gx2_initialized) {
         GX2RSetAllocator(NULL, NULL);
