@@ -47,6 +47,7 @@ static bool SDL_WIIU_StartKPADRuntime(void)
     KPADSetMaxControllers(WIIU_MAX_KPAD_CHANNELS);
     WPADEnableWiiRemote(TRUE);
     WPADEnableURCC(TRUE);
+    WPADEnableMotor(TRUE);
     SDL_WIIU_kpad_runtime_ready = true;
     SDL_WIIU_ResetKPADState();
     return true;
@@ -58,6 +59,7 @@ static void SDL_WIIU_StopKPADRuntime(void)
         return;
     }
 
+    WPADEnableMotor(FALSE);
     KPADShutdown();
     WPADShutdown();
     SDL_WIIU_kpad_runtime_ready = false;

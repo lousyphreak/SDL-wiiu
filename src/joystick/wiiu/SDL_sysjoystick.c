@@ -269,6 +269,49 @@ static bool SDL_WIIU_FamilyHasSensors(WIIUDeviceFamily family)
            SDL_WIIU_FamilyHasGyroscope(family);
 }
 
+static bool SDL_WIIU_FamilyHasRumble(WIIUDeviceFamily family)
+{
+    switch (family) {
+    case WIIU_DEVICE_FAMILY_DRC:
+    case WIIU_DEVICE_FAMILY_WIIMOTE:
+    case WIIU_DEVICE_FAMILY_NUNCHUK:
+    case WIIU_DEVICE_FAMILY_PRO:
+    case WIIU_DEVICE_FAMILY_CLASSIC:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static uint8_t SDL_WIIU_BuildDRCRumblePattern(Uint16 low_frequency_rumble, Uint16 high_frequency_rumble, uint8_t *pattern, uint8_t length)
+{
+    const Uint32 intensity = SDL_max((Uint32)low_frequency_rumble, (Uint32)high_frequency_rumble);
+    Uint32 accumulator = 0;
+    uint8_t active_samples = 0;
+    uint8_t i;
+
+    if (!pattern || length == 0 || intensity == 0) {
+        return 0;
+    }
+
+    for (i = 0; i < length; ++i) {
+        accumulator += intensity;
+        if (accumulator >= 0x10000u) {
+            pattern[i] = 0xFF;
+            accumulator -= 0x10000u;
+            ++active_samples;
+        } else {
+            pattern[i] = 0x00;
+        }
+    }
+
+    if (active_samples == 0) {
+        pattern[0] = 0xFF;
+    }
+
+    return length;
+}
+
 static void SDL_WIIU_AddSensorsForFamily(SDL_Joystick *joystick, WIIUDeviceFamily family)
 {
     if (SDL_WIIU_FamilyHasPrimaryAccelerometer(family)) {
@@ -794,7 +837,9 @@ static bool WIIU_JoystickOpen(SDL_Joystick *joystick, int device_index)
     }
     SDL_WIIU_AddSensorsForFamily(joystick, device->family);
 
-    SDL_SetBooleanProperty(SDL_GetJoystickProperties(joystick), SDL_PROP_JOYSTICK_CAP_RUMBLE_BOOLEAN, true);
+    SDL_SetBooleanProperty(SDL_GetJoystickProperties(joystick),
+                           SDL_PROP_JOYSTICK_CAP_RUMBLE_BOOLEAN,
+                           SDL_WIIU_FamilyHasRumble(device->family));
     return true;
 }
 
@@ -806,17 +851,25 @@ static bool WIIU_JoystickRumble(SDL_Joystick *joystick, Uint16 low_frequency_rum
     if (!hwdata) {
         return SDL_SetError("Invalid Wii U joystick");
     }
+    if (!SDL_WIIU_FamilyHasRumble(hwdata->family)) {
+        return SDL_Unsupported();
+    }
 
     if (hwdata->source == WIIU_DEVICE_SOURCE_DRC) {
         if (active) {
-            uint8_t pattern[1] = { 0xFF };
-            return VPADControlMotor(VPAD_CHAN_0, pattern, (uint8_t)SDL_arraysize(pattern)) >= 0;
+            uint8_t pattern[8];
+            const uint8_t length = SDL_WIIU_BuildDRCRumblePattern(low_frequency_rumble, high_frequency_rumble,
+                                                                  pattern, (uint8_t)SDL_arraysize(pattern));
+            return (length > 0 && VPADControlMotor(VPAD_CHAN_0, pattern, length) >= 0);
         }
 
         VPADStopMotor(VPAD_CHAN_0);
         return true;
     }
 
+    if (active && !WPADIsMotorEnabled()) {
+        WPADEnableMotor(TRUE);
+    }
     WPADControlMotor((WPADChan)hwdata->channel, active ? TRUE : FALSE);
     return true;
 }
@@ -1043,10 +1096,12 @@ static void WIIU_JoystickClose(SDL_Joystick *joystick)
         return;
     }
 
-    if (hwdata->source == WIIU_DEVICE_SOURCE_DRC) {
-        VPADStopMotor(VPAD_CHAN_0);
-    } else {
-        WPADControlMotor((WPADChan)hwdata->channel, FALSE);
+    if (SDL_WIIU_FamilyHasRumble(hwdata->family)) {
+        if (hwdata->source == WIIU_DEVICE_SOURCE_DRC) {
+            VPADStopMotor(VPAD_CHAN_0);
+        } else {
+            WPADControlMotor((WPADChan)hwdata->channel, FALSE);
+        }
     }
 
     SDL_free(hwdata);
