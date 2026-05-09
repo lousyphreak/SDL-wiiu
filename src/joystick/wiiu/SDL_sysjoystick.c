@@ -34,6 +34,7 @@
 #define WIIU_REMOTE_NAME "Nintendo Wii Remote"
 #define WIIU_NUNCHUK_NAME "Nintendo Wii Remote + Nunchuk"
 #define WIIU_MAX_DEVICES (1 + WIIU_MAX_KPAD_CHANNELS)
+#define WIIU_SENSOR_RATE_HZ 100.0f
 
 typedef enum WIIUDeviceSource
 {
@@ -110,6 +111,7 @@ typedef struct joystick_hwdata
     int channel;
     Uint32 buttons;
     Sint16 axes[WIIU_AXIS_COUNT];
+    bool sensors_enabled;
     bool touch_down;
     float touch_x;
     float touch_y;
@@ -236,9 +238,47 @@ static WPADDataFormat SDL_WIIU_GetDataFormatForFamily(WIIUDeviceFamily family)
     case WIIU_DEVICE_FAMILY_PRO:
         return WPAD_FMT_PRO_CONTROLLER;
     case WIIU_DEVICE_FAMILY_CLASSIC:
-        return WPAD_FMT_CLASSIC;
+        return WPAD_FMT_CLASSIC_ACC;
     default:
         return WPAD_FMT_CORE;
+    }
+}
+
+static bool SDL_WIIU_FamilyHasPrimaryAccelerometer(WIIUDeviceFamily family)
+{
+    return family == WIIU_DEVICE_FAMILY_DRC ||
+           family == WIIU_DEVICE_FAMILY_WIIMOTE ||
+           family == WIIU_DEVICE_FAMILY_NUNCHUK ||
+           family == WIIU_DEVICE_FAMILY_CLASSIC;
+}
+
+static bool SDL_WIIU_FamilyHasSecondaryAccelerometer(WIIUDeviceFamily family)
+{
+    return family == WIIU_DEVICE_FAMILY_NUNCHUK;
+}
+
+static bool SDL_WIIU_FamilyHasGyroscope(WIIUDeviceFamily family)
+{
+    return family == WIIU_DEVICE_FAMILY_DRC;
+}
+
+static bool SDL_WIIU_FamilyHasSensors(WIIUDeviceFamily family)
+{
+    return SDL_WIIU_FamilyHasPrimaryAccelerometer(family) ||
+           SDL_WIIU_FamilyHasSecondaryAccelerometer(family) ||
+           SDL_WIIU_FamilyHasGyroscope(family);
+}
+
+static void SDL_WIIU_AddSensorsForFamily(SDL_Joystick *joystick, WIIUDeviceFamily family)
+{
+    if (SDL_WIIU_FamilyHasPrimaryAccelerometer(family)) {
+        SDL_PrivateJoystickAddSensor(joystick, SDL_SENSOR_ACCEL, WIIU_SENSOR_RATE_HZ);
+    }
+    if (SDL_WIIU_FamilyHasSecondaryAccelerometer(family)) {
+        SDL_PrivateJoystickAddSensor(joystick, SDL_SENSOR_ACCEL_L, WIIU_SENSOR_RATE_HZ);
+    }
+    if (SDL_WIIU_FamilyHasGyroscope(family)) {
+        SDL_PrivateJoystickAddSensor(joystick, SDL_SENSOR_GYRO, WIIU_SENSOR_RATE_HZ);
     }
 }
 
@@ -340,6 +380,25 @@ static void SDL_WIIU_UpdateTouchpad(SDL_Joystick *joystick, joystick_hwdata *hwd
         hwdata->touch_y = y;
         hwdata->touch_pressure = pressure;
     }
+}
+
+static void SDL_WIIU_ConvertSensorAxes(float *data, float x, float y, float z, float scale)
+{
+    data[0] = -x * scale;
+    data[1] = z * scale;
+    data[2] = y * scale;
+}
+
+static void SDL_WIIU_SendSensorData(SDL_Joystick *joystick, joystick_hwdata *hwdata, Uint64 timestamp, SDL_SensorType type, float x, float y, float z, float scale)
+{
+    float data[3];
+
+    if (!hwdata->sensors_enabled) {
+        return;
+    }
+
+    SDL_WIIU_ConvertSensorAxes(data, x, y, z, scale);
+    SDL_SendJoystickSensor(timestamp, joystick, type, timestamp, data, SDL_arraysize(data));
 }
 
 static void SDL_WIIU_SendAxes(SDL_Joystick *joystick, joystick_hwdata *hwdata, Uint64 timestamp, const Sint16 *axes)
@@ -733,6 +792,7 @@ static bool WIIU_JoystickOpen(SDL_Joystick *joystick, int device_index)
     if (device->family == WIIU_DEVICE_FAMILY_DRC) {
         SDL_PrivateJoystickAddTouchpad(joystick, 1);
     }
+    SDL_WIIU_AddSensorsForFamily(joystick, device->family);
 
     SDL_SetBooleanProperty(SDL_GetJoystickProperties(joystick), SDL_PROP_JOYSTICK_CAP_RUMBLE_BOOLEAN, true);
     return true;
@@ -778,7 +838,19 @@ static bool WIIU_JoystickSendEffect(SDL_Joystick *joystick, const void *data, in
 
 static bool WIIU_JoystickSetSensorsEnabled(SDL_Joystick *joystick, bool enabled)
 {
-    return SDL_Unsupported();
+    joystick_hwdata *hwdata = joystick->hwdata;
+
+    SDL_AssertJoysticksLocked();
+
+    if (!hwdata) {
+        return SDL_SetError("Invalid Wii U joystick");
+    }
+    if (!SDL_WIIU_FamilyHasSensors(hwdata->family)) {
+        return SDL_Unsupported();
+    }
+
+    hwdata->sensors_enabled = enabled;
+    return true;
 }
 
 static void SDL_WIIU_UpdateDRC(SDL_Joystick *joystick, joystick_hwdata *hwdata)
@@ -803,6 +875,16 @@ static void SDL_WIIU_UpdateDRC(SDL_Joystick *joystick, joystick_hwdata *hwdata)
     SDL_WIIU_UpdateTouchpad(joystick, hwdata, timestamp, state);
 
     if (valid) {
+        SDL_WIIU_SendSensorData(joystick, hwdata, timestamp, SDL_SENSOR_ACCEL,
+                                state->status.accelorometer.acc.x,
+                                state->status.accelorometer.acc.y,
+                                state->status.accelorometer.acc.z,
+                                SDL_STANDARD_GRAVITY);
+        SDL_WIIU_SendSensorData(joystick, hwdata, timestamp, SDL_SENSOR_GYRO,
+                                state->status.gyro.x,
+                                state->status.gyro.y,
+                                state->status.gyro.z,
+                                1.0f);
         battery_state = SDL_POWERSTATE_ON_BATTERY;
         battery_percent = SDL_min(((int)state->status.battery * 100 + 96) / 192, 100);
     }
@@ -849,6 +931,9 @@ static void SDL_WIIU_UpdateClassic(SDL_Joystick *joystick, joystick_hwdata *hwda
 
     SDL_WIIU_SendAxes(joystick, hwdata, timestamp, axes);
     SDL_WIIU_SendButtons(joystick, hwdata, timestamp, buttons);
+    SDL_WIIU_SendSensorData(joystick, hwdata, timestamp, SDL_SENSOR_ACCEL,
+                            status->acc.x, status->acc.y, status->acc.z,
+                            SDL_STANDARD_GRAVITY);
     joystick->connection_state = SDL_JOYSTICK_CONNECTION_WIRELESS;
     SDL_WIIU_UpdatePowerInfo(joystick, hwdata, SDL_POWERSTATE_ON_BATTERY, battery_percent);
 }
@@ -859,6 +944,9 @@ static void SDL_WIIU_UpdateWiimote(SDL_Joystick *joystick, joystick_hwdata *hwda
     const int battery_percent = SDL_WIIU_GetBatteryPercentFromLevel(WPADGetBatteryLevel((WPADChan)hwdata->channel));
 
     SDL_WIIU_SendButtons(joystick, hwdata, timestamp, buttons);
+    SDL_WIIU_SendSensorData(joystick, hwdata, timestamp, SDL_SENSOR_ACCEL,
+                            status->acc.x, status->acc.y, status->acc.z,
+                            SDL_STANDARD_GRAVITY);
     joystick->connection_state = SDL_JOYSTICK_CONNECTION_WIRELESS;
     SDL_WIIU_UpdatePowerInfo(joystick, hwdata, SDL_POWERSTATE_ON_BATTERY, battery_percent);
 }
@@ -874,6 +962,12 @@ static void SDL_WIIU_UpdateNunchuk(SDL_Joystick *joystick, joystick_hwdata *hwda
 
     SDL_WIIU_SendAxes(joystick, hwdata, timestamp, axes);
     SDL_WIIU_SendButtons(joystick, hwdata, timestamp, buttons);
+    SDL_WIIU_SendSensorData(joystick, hwdata, timestamp, SDL_SENSOR_ACCEL,
+                            status->acc.x, status->acc.y, status->acc.z,
+                            SDL_STANDARD_GRAVITY);
+    SDL_WIIU_SendSensorData(joystick, hwdata, timestamp, SDL_SENSOR_ACCEL_L,
+                            status->nunchuk.acc.x, status->nunchuk.acc.y, status->nunchuk.acc.z,
+                            SDL_STANDARD_GRAVITY);
     joystick->connection_state = SDL_JOYSTICK_CONNECTION_WIRELESS;
     SDL_WIIU_UpdatePowerInfo(joystick, hwdata, SDL_POWERSTATE_ON_BATTERY, battery_percent);
 }
