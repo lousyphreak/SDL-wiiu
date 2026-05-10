@@ -423,6 +423,10 @@ bool SDL_SYS_GetPathInfo(const char *path, SDL_PathInfo *info)
 // Note that this is actually part of filesystem, not fsops, but everything that uses posix fsops uses this implementation, even with separate filesystem code.
 char *SDL_SYS_GetCurrentDirectory(void)
 {
+#ifdef SDL_PLATFORM_WIIU
+    const char *base = SDL_GetBasePath();
+    return base ? SDL_strdup(base) : NULL;
+#else
     size_t buflen = 64;
     char *buf = NULL;
 
@@ -457,6 +461,7 @@ char *SDL_SYS_GetCurrentDirectory(void)
     }
 
     return buf;
+#endif
 }
 
 #endif // SDL_FSOPS_POSIX

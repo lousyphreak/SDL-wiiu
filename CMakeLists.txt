@@ -3625,6 +3625,8 @@ elseif(N3DS)
   )
 
 elseif(WIIU)
+  enable_language(CXX)
+
   if(SDL_AUDIO)
     set(SDL_AUDIO_DRIVER_WIIU 1)
     sdl_glob_sources(
@@ -3688,15 +3690,20 @@ elseif(WIIU)
   sdl_glob_sources(
     "${SDL3_SOURCE_DIR}/src/main/wiiu/*.c"
     "${SDL3_SOURCE_DIR}/src/core/wiiu/*.c"
+    "${SDL3_SOURCE_DIR}/src/core/wiiu/*.cpp"
     "${SDL3_SOURCE_DIR}/src/core/wiiu/*.h"
   )
 
-  set(SDL_FILESYSTEM_UNIX 1)
-  sdl_glob_sources("${SDL3_SOURCE_DIR}/src/filesystem/unix/*.c")
+  set(SDL_FILESYSTEM_WIIU 1)
+  sdl_glob_sources("${SDL3_SOURCE_DIR}/src/filesystem/wiiu/*.c")
   set(HAVE_SDL_FILESYSTEM TRUE)
 
+  set(SDL_STORAGE_PRIVATE 1)
   set(SDL_STORAGE_GENERIC 1)
-  sdl_glob_sources("${SDL3_SOURCE_DIR}/src/storage/generic/*.c")
+  sdl_glob_sources(
+    "${SDL3_SOURCE_DIR}/src/storage/generic/*.c"
+    "${SDL3_SOURCE_DIR}/src/storage/wiiu/*.c"
+  )
   set(HAVE_SDL_STORAGE TRUE)
 
   set(SDL_FSOPS_POSIX 1)
