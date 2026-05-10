@@ -30,7 +30,9 @@
 
 #define WIIU_AUDIO_MIX_BUFFERS 4
 #define WIIU_AUDIO_RING_BUFFERS 4
-#define WIIU_AUDIO_CHANNELS 2
+#define WIIU_AUDIO_MAX_PLAYBACK_CHANNELS 6
+#define WIIU_AUDIO_MAX_TV_CHANNELS 6
+#define WIIU_AUDIO_MAX_DRC_CHANNELS 4
 
 struct SDL_PrivateAudioData
 {
@@ -42,11 +44,14 @@ struct SDL_PrivateAudioData
     Uint32 sample_rate;
     Uint32 frame_samples;
     Uint64 frame_duration_ns;
+    Uint32 playback_channels;
+    Uint32 tv_channels;
+    Uint32 drc_channels;
     Uint32 ring_frames;
     Uint32 write_frame_offset;
 
-    Sint16 *playback_channels[WIIU_AUDIO_CHANNELS];
-    AXVoice *voices[WIIU_AUDIO_CHANNELS];
+    Sint16 *playback_channel_buffers[WIIU_AUDIO_MAX_PLAYBACK_CHANNELS];
+    AXVoice *voices[WIIU_AUDIO_MAX_PLAYBACK_CHANNELS];
 
     MEMResource mic_resource;
     MICRingBuffer mic_ring;

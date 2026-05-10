@@ -32,12 +32,15 @@
 #include <coreinit/cache.h>
 #include <coreinit/memdefaultheap.h>
 #include <sndcore2/core.h>
+#include <sndcore2/device.h>
 
 #define WIIUAUDIO_DRIVER_NAME "wiiu"
 #define WIIUAUDIO_PLAYBACK_NAME "Wii U system audio"
 #define WIIUAUDIO_RECORDING_NAME "Wii U microphone"
 #define WIIUAUDIO_VOICE_PRIORITY 31
 #define WIIUAUDIO_MAX_GAIN 0x8000
+
+static const int WIIUAUDIO_TV_5POINT1_CHMAP[WIIU_AUDIO_MAX_TV_CHANNELS] = { 0, 1, 4, 5, 2, 3 };
 
 static Uint32 WIIUAUDIO_AlignFrames(Uint32 frames, Uint32 quantum)
 {
@@ -51,6 +54,145 @@ static Uint32 WIIUAUDIO_AlignFrames(Uint32 frames, Uint32 quantum)
 static Uint32 WIIUAUDIO_DistanceFrames(Uint32 from, Uint32 to, Uint32 ring_frames)
 {
     return (to >= from) ? (to - from) : (ring_frames - from + to);
+}
+
+static Uint16 WIIUAUDIO_FloatToGain(float gain)
+{
+    const float clamped = SDL_clamp(gain, 0.0f, 1.0f);
+    return (Uint16)(clamped * (float)WIIUAUDIO_MAX_GAIN);
+}
+
+static Uint32 WIIUAUDIO_FallbackChannelCount(AXDeviceType type, AXDeviceMode mode)
+{
+    switch (mode) {
+    case AX_DEVICE_MODE_MONO:
+        return 1;
+    case AX_DEVICE_MODE_6_CHANNEL:
+        return (type == AX_DEVICE_TYPE_TV) ? 6u : 2u;
+    case AX_DEVICE_MODE_STEREO:
+    case AX_DEVICE_MODE_SURROUND:
+    case AX_DEVICE_MODE_DPL2:
+    default:
+        return 2;
+    }
+}
+
+static Uint32 WIIUAUDIO_QueryChannelCount(AXDeviceType type, Uint32 fallback)
+{
+    Uint32 count = 0;
+
+    if ((AXGetDeviceChannelCount(type, 0, &count) == AX_RESULT_SUCCESS) && (count > 0)) {
+        return count;
+    }
+
+    {
+        AXDeviceMode mode = AX_DEVICE_MODE_STEREO;
+        if (AXGetDeviceMode(type, &mode) == AX_RESULT_SUCCESS) {
+            return WIIUAUDIO_FallbackChannelCount(type, mode);
+        }
+    }
+
+    return fallback;
+}
+
+static Uint32 WIIUAUDIO_GetPreferredPlaybackChannels(Uint32 requested_channels, Uint32 tv_channels)
+{
+    if ((tv_channels >= WIIU_AUDIO_MAX_TV_CHANNELS) && (requested_channels > 2)) {
+        return WIIU_AUDIO_MAX_TV_CHANNELS;
+    }
+
+    return 2;
+}
+
+static bool WIIUAUDIO_SetDeviceChannelMap(SDL_AudioDevice *device)
+{
+    SDL_free(device->chmap);
+    device->chmap = NULL;
+
+    if (device->spec.channels == WIIU_AUDIO_MAX_TV_CHANNELS) {
+        device->chmap = SDL_ChannelMapDup(WIIUAUDIO_TV_5POINT1_CHMAP, WIIU_AUDIO_MAX_TV_CHANNELS);
+        if (!device->chmap) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+static void WIIUAUDIO_InitTVChannelMix(SDL_AudioDevice *device, Uint32 channel, AXVoiceDeviceMixData *mix)
+{
+    SDL_memset(mix, 0, sizeof(*mix) * WIIU_AUDIO_MAX_TV_CHANNELS);
+
+    if (device->hidden->tv_channels == 1) {
+        switch (channel) {
+        case 0:
+        case 1:
+            mix[0].bus[0].volume = WIIUAUDIO_FloatToGain(0.70710678f);
+            break;
+        default:
+            break;
+        }
+    } else if (channel < device->hidden->tv_channels) {
+        mix[channel].bus[0].volume = WIIUAUDIO_MAX_GAIN;
+    }
+}
+
+static void WIIUAUDIO_InitDRCChannelMix(SDL_AudioDevice *device, Uint32 channel, AXVoiceDeviceMixData *mix)
+{
+    const Uint32 drc_channels = device->hidden->drc_channels;
+
+    SDL_memset(mix, 0, sizeof(*mix) * WIIU_AUDIO_MAX_DRC_CHANNELS);
+
+    if (drc_channels == 0) {
+        return;
+    }
+
+    if (drc_channels == 1) {
+        switch (channel) {
+        case 0:
+        case 1:
+            mix[0].bus[0].volume = WIIUAUDIO_MAX_GAIN;
+            break;
+        case 2:
+        case 3:
+            mix[0].bus[0].volume = WIIUAUDIO_FloatToGain(0.70710678f);
+            break;
+        case 4:
+            mix[0].bus[0].volume = WIIUAUDIO_FloatToGain(0.70710678f);
+            break;
+        case 5:
+            mix[0].bus[0].volume = WIIUAUDIO_FloatToGain(0.5f);
+            break;
+        default:
+            break;
+        }
+        return;
+    }
+
+    switch (channel) {
+    case 0:
+        mix[0].bus[0].volume = WIIUAUDIO_MAX_GAIN;
+        break;
+    case 1:
+        mix[1].bus[0].volume = WIIUAUDIO_MAX_GAIN;
+        break;
+    case 2:
+        mix[0].bus[0].volume = WIIUAUDIO_FloatToGain(0.70710678f);
+        break;
+    case 3:
+        mix[1].bus[0].volume = WIIUAUDIO_FloatToGain(0.70710678f);
+        break;
+    case 4:
+        mix[0].bus[0].volume = WIIUAUDIO_FloatToGain(0.70710678f);
+        mix[1].bus[0].volume = WIIUAUDIO_FloatToGain(0.70710678f);
+        break;
+    case 5:
+        mix[0].bus[0].volume = WIIUAUDIO_FloatToGain(0.5f);
+        mix[1].bus[0].volume = WIIUAUDIO_FloatToGain(0.5f);
+        break;
+    default:
+        break;
+    }
 }
 
 static const char *WIIUAUDIO_MICErrorName(MICError error)
@@ -79,17 +221,15 @@ static void WIIUAUDIO_EndVoice(AXVoice *voice)
     AXVoiceEnd(voice);
 }
 
-static void WIIUAUDIO_ConfigureVoice(AXVoice *voice, Sint16 *samples, Uint32 ring_frames, int channel)
+static bool WIIUAUDIO_ConfigureVoice(SDL_AudioDevice *device, AXVoice *voice, Sint16 *samples, Uint32 ring_frames, Uint32 channel)
 {
     AXVoiceOffsets offsets;
     AXVoiceVeData ve;
-    AXVoiceMixData tv_mix;
-    AXVoiceDRCMixData drc_mix;
+    AXVoiceDeviceMixData tv_mix[WIIU_AUDIO_MAX_TV_CHANNELS];
+    AXVoiceDeviceMixData drc_mix[WIIU_AUDIO_MAX_DRC_CHANNELS];
 
     SDL_zero(offsets);
     SDL_zero(ve);
-    SDL_zero(tv_mix);
-    SDL_zero(drc_mix);
 
     offsets.dataType = AX_VOICE_FORMAT_LPCM16;
     offsets.loopingEnabled = AX_VOICE_LOOP_ENABLED;
@@ -99,31 +239,37 @@ static void WIIUAUDIO_ConfigureVoice(AXVoice *voice, Sint16 *samples, Uint32 rin
     offsets.data = samples;
 
     ve.volume = WIIUAUDIO_MAX_GAIN;
+    WIIUAUDIO_InitTVChannelMix(device, channel, tv_mix);
+    WIIUAUDIO_InitDRCChannelMix(device, channel, drc_mix);
 
-    if (channel == 0) {
-        tv_mix.left = WIIUAUDIO_MAX_GAIN;
-        drc_mix.left = WIIUAUDIO_MAX_GAIN;
-    } else {
-        tv_mix.right = WIIUAUDIO_MAX_GAIN;
-        drc_mix.right = WIIUAUDIO_MAX_GAIN;
+    if (!WIIUAUDIO_BeginVoice(voice)) {
+        return SDL_SetError("AXVoiceBegin failed for Wii U playback channel %u", (unsigned int)channel);
     }
 
-    if (WIIUAUDIO_BeginVoice(voice)) {
-        AXSetVoiceType(voice, AX_VOICE_TYPE_STREAM);
-        AXSetVoiceSrcType(voice, AX_VOICE_SRC_TYPE_NONE);
-        AXSetVoiceSrcRatio(voice, 1.0f);
-        AXSetVoiceOffsets(voice, &offsets);
-        AXSetVoiceVe(voice, &ve);
-        AXSetVoiceMix(voice, &tv_mix);
-        AXSetVoiceDRCMix(voice, &drc_mix);
-        AXSetVoiceState(voice, AX_VOICE_STATE_STOPPED);
+    AXSetVoiceType(voice, AX_VOICE_TYPE_STREAM);
+    AXSetVoiceSrcType(voice, AX_VOICE_SRC_TYPE_NONE);
+    AXSetVoiceSrcRatio(voice, 1.0f);
+    AXSetVoiceOffsets(voice, &offsets);
+    AXSetVoiceVe(voice, &ve);
+
+    if (AXSetVoiceDeviceMix(voice, AX_DEVICE_TYPE_TV, 0, tv_mix) != AX_RESULT_SUCCESS) {
         WIIUAUDIO_EndVoice(voice);
+        return SDL_SetError("AXSetVoiceDeviceMix failed for Wii U TV output channel %u", (unsigned int)channel);
     }
+
+    if (AXSetVoiceDeviceMix(voice, AX_DEVICE_TYPE_DRC, 0, drc_mix) != AX_RESULT_SUCCESS) {
+        WIIUAUDIO_EndVoice(voice);
+        return SDL_SetError("AXSetVoiceDeviceMix failed for Wii U DRC output channel %u", (unsigned int)channel);
+    }
+
+    AXSetVoiceState(voice, AX_VOICE_STATE_STOPPED);
+    WIIUAUDIO_EndVoice(voice);
+    return true;
 }
 
 static void WIIUAUDIO_SetPlaybackState(SDL_AudioDevice *device, AXVoiceState state)
 {
-    for (int i = 0; i < WIIU_AUDIO_CHANNELS; ++i) {
+    for (Uint32 i = 0; i < device->hidden->playback_channels; ++i) {
         AXVoice *voice = device->hidden->voices[i];
         if (voice && WIIUAUDIO_BeginVoice(voice)) {
             AXSetVoiceState(voice, state);
@@ -132,44 +278,52 @@ static void WIIUAUDIO_SetPlaybackState(SDL_AudioDevice *device, AXVoiceState sta
     }
 }
 
-static void WIIUAUDIO_ClearPlaybackRing(SDL_AudioDevice *device)
+static bool WIIUAUDIO_ClearPlaybackRing(SDL_AudioDevice *device)
 {
     const Uint32 ring_bytes = device->hidden->ring_frames * sizeof(Sint16);
 
-    for (int i = 0; i < WIIU_AUDIO_CHANNELS; ++i) {
-        SDL_memset(device->hidden->playback_channels[i], 0, ring_bytes);
-        DCFlushRange(device->hidden->playback_channels[i], ring_bytes);
+    for (Uint32 i = 0; i < device->hidden->playback_channels; ++i) {
+        SDL_memset(device->hidden->playback_channel_buffers[i], 0, ring_bytes);
+        DCFlushRange(device->hidden->playback_channel_buffers[i], ring_bytes);
         if (device->hidden->voices[i]) {
-            WIIUAUDIO_ConfigureVoice(device->hidden->voices[i],
-                                     device->hidden->playback_channels[i],
-                                     device->hidden->ring_frames,
-                                     i);
+            if (!WIIUAUDIO_ConfigureVoice(device,
+                                          device->hidden->voices[i],
+                                          device->hidden->playback_channel_buffers[i],
+                                          device->hidden->ring_frames,
+                                          i)) {
+                return false;
+            }
         }
     }
 
     device->hidden->write_frame_offset = (Uint32)device->sample_frames;
+    return true;
 }
 
-static void WIIUAUDIO_UpdateForegroundState(SDL_AudioDevice *device)
+static bool WIIUAUDIO_UpdateForegroundState(SDL_AudioDevice *device)
 {
     const bool in_foreground = SDL_WIIU_IsInForeground();
 
     if (device->hidden->foreground_active == in_foreground) {
-        return;
+        return true;
     }
 
     device->hidden->foreground_active = in_foreground;
     if (in_foreground) {
-        WIIUAUDIO_ClearPlaybackRing(device);
+        if (!WIIUAUDIO_ClearPlaybackRing(device)) {
+            return false;
+        }
         WIIUAUDIO_SetPlaybackState(device, AX_VOICE_STATE_PLAYING);
     } else {
         WIIUAUDIO_SetPlaybackState(device, AX_VOICE_STATE_STOPPED);
     }
+
+    return true;
 }
 
 static Uint32 WIIUAUDIO_GetPlaybackReadOffset(SDL_AudioDevice *device)
 {
-    Uint32 offset = AXGetVoiceCurrentOffsetEx(device->hidden->voices[0], device->hidden->playback_channels[0]);
+    Uint32 offset = AXGetVoiceCurrentOffsetEx(device->hidden->voices[0], device->hidden->playback_channel_buffers[0]);
     if (device->hidden->ring_frames > 0) {
         offset %= device->hidden->ring_frames;
     }
@@ -184,7 +338,7 @@ static void WIIUAUDIO_ClosePlaybackDevice(SDL_AudioDevice *device)
 
     WIIUAUDIO_SetPlaybackState(device, AX_VOICE_STATE_STOPPED);
 
-    for (int i = 0; i < WIIU_AUDIO_CHANNELS; ++i) {
+    for (int i = 0; i < WIIU_AUDIO_MAX_PLAYBACK_CHANNELS; ++i) {
         if (device->hidden->voices[i]) {
             AXFreeVoice(device->hidden->voices[i]);
             device->hidden->voices[i] = NULL;
@@ -196,10 +350,10 @@ static void WIIUAUDIO_ClosePlaybackDevice(SDL_AudioDevice *device)
         device->hidden->rawbuf = NULL;
     }
 
-    for (int i = 0; i < WIIU_AUDIO_CHANNELS; ++i) {
-        if (device->hidden->playback_channels[i]) {
-            SDL_aligned_free(device->hidden->playback_channels[i]);
-            device->hidden->playback_channels[i] = NULL;
+    for (int i = 0; i < WIIU_AUDIO_MAX_PLAYBACK_CHANNELS; ++i) {
+        if (device->hidden->playback_channel_buffers[i]) {
+            SDL_aligned_free(device->hidden->playback_channel_buffers[i]);
+            device->hidden->playback_channel_buffers[i] = NULL;
         }
     }
 
@@ -213,6 +367,7 @@ static bool WIIUAUDIO_OpenPlaybackDevice(SDL_AudioDevice *device)
     Uint32 mixlen;
     Uint32 runtime_sample_rate;
     Uint32 runtime_frame_samples;
+    Uint32 tv_channels;
     Uint32 ring_bytes;
 
     while ((test_format = *(closefmts++)) != 0) {
@@ -226,9 +381,19 @@ static bool WIIUAUDIO_OpenPlaybackDevice(SDL_AudioDevice *device)
         return SDL_SetError("Wii U audio backend requires native-endian signed 16-bit PCM");
     }
 
-    device->spec.channels = WIIU_AUDIO_CHANNELS;
-
     if (!SDL_WIIU_AX_Acquire(&runtime_sample_rate, &runtime_frame_samples)) {
+        return false;
+    }
+
+    tv_channels = WIIUAUDIO_QueryChannelCount(AX_DEVICE_TYPE_TV, 2);
+    device->hidden->tv_channels = SDL_min(tv_channels, (Uint32)WIIU_AUDIO_MAX_TV_CHANNELS);
+    device->hidden->drc_channels = SDL_min(WIIUAUDIO_QueryChannelCount(AX_DEVICE_TYPE_DRC, 2),
+                                           (Uint32)WIIU_AUDIO_MAX_DRC_CHANNELS);
+    device->hidden->playback_channels =
+        WIIUAUDIO_GetPreferredPlaybackChannels((Uint32)device->spec.channels, device->hidden->tv_channels);
+    device->spec.channels = (Uint8)device->hidden->playback_channels;
+
+    if (!WIIUAUDIO_SetDeviceChannelMap(device)) {
         return false;
     }
 
@@ -253,22 +418,24 @@ static bool WIIUAUDIO_OpenPlaybackDevice(SDL_AudioDevice *device)
     }
 
     ring_bytes = device->hidden->ring_frames * sizeof(Sint16);
-    for (int i = 0; i < WIIU_AUDIO_CHANNELS; ++i) {
-        device->hidden->playback_channels[i] = (Sint16 *)SDL_aligned_alloc(64, ring_bytes);
-        if (!device->hidden->playback_channels[i]) {
+    for (Uint32 i = 0; i < device->hidden->playback_channels; ++i) {
+        device->hidden->playback_channel_buffers[i] = (Sint16 *)SDL_aligned_alloc(64, ring_bytes);
+        if (!device->hidden->playback_channel_buffers[i]) {
             return SDL_OutOfMemory();
         }
     }
 
-    for (int i = 0; i < WIIU_AUDIO_CHANNELS; ++i) {
+    for (Uint32 i = 0; i < device->hidden->playback_channels; ++i) {
         device->hidden->voices[i] = AXAcquireVoice(WIIUAUDIO_VOICE_PRIORITY, NULL, NULL);
         if (!device->hidden->voices[i]) {
-            return SDL_SetError("AXAcquireVoice failed for Wii U playback channel %d", i);
+            return SDL_SetError("AXAcquireVoice failed for Wii U playback channel %u", (unsigned int)i);
         }
     }
 
     device->hidden->foreground_active = true;
-    WIIUAUDIO_ClearPlaybackRing(device);
+    if (!WIIUAUDIO_ClearPlaybackRing(device)) {
+        return false;
+    }
     device->hidden->foreground_active = SDL_WIIU_IsInForeground();
     WIIUAUDIO_SetPlaybackState(device,
                                device->hidden->foreground_active ? AX_VOICE_STATE_PLAYING : AX_VOICE_STATE_STOPPED);
@@ -356,7 +523,9 @@ static bool WIIUAUDIO_WaitDevice(SDL_AudioDevice *device)
     const Uint32 max_queued_frames = device->hidden->ring_frames - (Uint32)device->sample_frames;
 
     while (!SDL_GetAtomicInt(&device->shutdown)) {
-        WIIUAUDIO_UpdateForegroundState(device);
+        if (!WIIUAUDIO_UpdateForegroundState(device)) {
+            return false;
+        }
 
         if (!device->hidden->foreground_active) {
             SDL_Delay(16);
@@ -391,8 +560,6 @@ static bool WIIUAUDIO_PlayDevice(SDL_AudioDevice *device, const Uint8 *buffer, i
     const Sint16 *src = (const Sint16 *)buffer;
     const Uint32 frame_offset = device->hidden->write_frame_offset;
     const Uint32 frame_count = (Uint32)device->sample_frames;
-    Sint16 *dst_left;
-    Sint16 *dst_right;
     const Uint32 slot_bytes = frame_count * sizeof(Sint16);
 
     SDL_assert(buflen == device->buffer_size);
@@ -401,16 +568,13 @@ static bool WIIUAUDIO_PlayDevice(SDL_AudioDevice *device, const Uint8 *buffer, i
         return true;
     }
 
-    dst_left = device->hidden->playback_channels[0] + frame_offset;
-    dst_right = device->hidden->playback_channels[1] + frame_offset;
-
-    for (Uint32 i = 0; i < frame_count; ++i) {
-        dst_left[i] = src[i * 2];
-        dst_right[i] = src[i * 2 + 1];
+    for (Uint32 channel = 0; channel < device->hidden->playback_channels; ++channel) {
+        Sint16 *dst = device->hidden->playback_channel_buffers[channel] + frame_offset;
+        for (Uint32 i = 0; i < frame_count; ++i) {
+            dst[i] = src[(i * device->hidden->playback_channels) + channel];
+        }
+        DCFlushRange(dst, slot_bytes);
     }
-
-    DCFlushRange(dst_left, slot_bytes);
-    DCFlushRange(dst_right, slot_bytes);
 
     device->hidden->write_frame_offset += frame_count;
     if (device->hidden->write_frame_offset >= device->hidden->ring_frames) {
@@ -522,7 +686,24 @@ static void WIIUAUDIO_CloseDevice(SDL_AudioDevice *device)
 
 static void WIIUAUDIO_DetectDevices(SDL_AudioDevice **default_playback, SDL_AudioDevice **default_recording)
 {
-    *default_playback = SDL_AddAudioDevice(false, WIIUAUDIO_PLAYBACK_NAME, NULL, (void *)((size_t)0x1));
+    SDL_AudioSpec playback_spec;
+    Uint32 runtime_sample_rate;
+    Uint32 runtime_frame_samples;
+
+    SDL_zero(playback_spec);
+
+    if (SDL_WIIU_AX_Acquire(&runtime_sample_rate, &runtime_frame_samples)) {
+        const Uint32 tv_channels = WIIUAUDIO_QueryChannelCount(AX_DEVICE_TYPE_TV, 2);
+        (void)runtime_frame_samples;
+        playback_spec.format = SDL_AUDIO_S16;
+        playback_spec.channels = (Uint8)WIIUAUDIO_GetPreferredPlaybackChannels(tv_channels, tv_channels);
+        playback_spec.freq = (int)runtime_sample_rate;
+        SDL_WIIU_AX_Release();
+        *default_playback = SDL_AddAudioDevice(false, WIIUAUDIO_PLAYBACK_NAME, &playback_spec, (void *)((size_t)0x1));
+    } else {
+        *default_playback = SDL_AddAudioDevice(false, WIIUAUDIO_PLAYBACK_NAME, NULL, (void *)((size_t)0x1));
+    }
+
     *default_recording = SDL_AddAudioDevice(true, WIIUAUDIO_RECORDING_NAME, NULL, (void *)((size_t)0x2));
 }
 
