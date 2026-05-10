@@ -25,6 +25,7 @@
 #include "SDL_wiiulog.h"
 
 #include <arpa/inet.h>
+#include <coreinit/debug.h>
 #include <netinet/in.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -251,6 +252,8 @@ void SDL_WIIU_LogOutput(const char *message)
     if (!message || !*message) {
         return;
     }
+
+    OSReport("%s\n", message);
 
     if (!SDL_WIIU_FlushPendingLogs()) {
         (void)SDL_WIIU_QueueLogMessage(message);
