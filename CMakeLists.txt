@@ -3710,15 +3710,15 @@ elseif(WIIU)
   sdl_sources("${SDL3_SOURCE_DIR}/src/filesystem/posix/SDL_sysfsops.c")
   set(HAVE_SDL_FSOPS TRUE)
 
-  sdl_glob_sources("${SDL3_SOURCE_DIR}/src/locale/unix/*.c")
+  sdl_glob_sources("${SDL3_SOURCE_DIR}/src/locale/wiiu/*.c")
   set(HAVE_SDL_LOCALE TRUE)
 
-  set(SDL_TIME_UNIX 1)
-  sdl_glob_sources("${SDL3_SOURCE_DIR}/src/time/unix/*.c")
+  set(SDL_TIME_WIIU 1)
+  sdl_glob_sources("${SDL3_SOURCE_DIR}/src/time/wiiu/*.c")
   set(HAVE_SDL_TIME TRUE)
 
-  set(SDL_TIMER_UNIX 1)
-  sdl_glob_sources("${SDL3_SOURCE_DIR}/src/timer/unix/*.c")
+  set(SDL_TIMER_WIIU 1)
+  sdl_glob_sources("${SDL3_SOURCE_DIR}/src/timer/wiiu/*.c")
   set(HAVE_SDL_TIMERS TRUE)
 
   set(SDL_THREAD_WIIU 1)
