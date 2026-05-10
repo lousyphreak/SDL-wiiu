@@ -76,23 +76,23 @@ vec4 sample_index8_pixelart()
 
 vec4 sample_yuv3()
 {
-    float y = texture(u_texture0, v_texcoord).r;
-    float u = texture(u_texture1, v_texcoord).r;
-    float v = texture(u_texture2, v_texcoord).r;
-    return vec4(dot(vec4(y, u, v, 1.0), u_yuv_r_coeff),
-                dot(vec4(y, u, v, 1.0), u_yuv_g_coeff),
-                dot(vec4(y, u, v, 1.0), u_yuv_b_coeff),
-                1.0) + u_yuv_offset;
+    vec3 yuv = vec3(texture(u_texture0, v_texcoord).r,
+                    texture(u_texture1, v_texcoord).r,
+                    texture(u_texture2, v_texcoord).r) + u_yuv_offset.xyz;
+    return vec4(dot(vec4(yuv, 1.0), u_yuv_r_coeff),
+                dot(vec4(yuv, 1.0), u_yuv_g_coeff),
+                dot(vec4(yuv, 1.0), u_yuv_b_coeff),
+                1.0);
 }
 
 vec4 sample_nv()
 {
-    float y = texture(u_texture0, v_texcoord).r;
-    vec2 uv = texture(u_texture1, v_texcoord).rg;
-    return vec4(dot(vec4(y, uv.x, uv.y, 1.0), u_yuv_r_coeff),
-                dot(vec4(y, uv.x, uv.y, 1.0), u_yuv_g_coeff),
-                dot(vec4(y, uv.x, uv.y, 1.0), u_yuv_b_coeff),
-                1.0) + u_yuv_offset;
+    vec3 yuv = vec3(texture(u_texture0, v_texcoord).r,
+                    texture(u_texture1, v_texcoord).rg) + u_yuv_offset.xyz;
+    return vec4(dot(vec4(yuv, 1.0), u_yuv_r_coeff),
+                dot(vec4(yuv, 1.0), u_yuv_g_coeff),
+                dot(vec4(yuv, 1.0), u_yuv_b_coeff),
+                1.0);
 }
 
 void main()

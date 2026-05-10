@@ -56,6 +56,9 @@ static const CameraBootStrap *const bootstrap[] = {
 #ifdef SDL_CAMERA_DRIVER_VITA
     &VITACAMERA_bootstrap,
 #endif
+#ifdef SDL_CAMERA_DRIVER_WIIU
+    &WIIUCAMERA_bootstrap,
+#endif
 #ifdef SDL_CAMERA_DRIVER_DUMMY
     &DUMMYCAMERA_bootstrap,
 #endif

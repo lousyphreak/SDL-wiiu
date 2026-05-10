@@ -226,5 +226,6 @@ extern CameraBootStrap OPENHARMONYCAMERA_bootstrap;
 extern CameraBootStrap EMSCRIPTENCAMERA_bootstrap;
 extern CameraBootStrap MEDIAFOUNDATION_bootstrap;
 extern CameraBootStrap VITACAMERA_bootstrap;
+extern CameraBootStrap WIIUCAMERA_bootstrap;
 
 #endif // SDL_syscamera_h_
