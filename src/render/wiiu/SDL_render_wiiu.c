@@ -117,6 +117,7 @@ typedef struct WIIU_RenderData
     SDL_ScaleMode sampler_scale_mode;
     SDL_TextureAddressMode sampler_address_u;
     SDL_TextureAddressMode sampler_address_v;
+    bool sampler_indexed;
     GX2Sampler palette_sampler;
     WIIU_TextureData backbuffer;
     int backbuffer_w;
@@ -148,6 +149,9 @@ static bool WIIU_QueueSetViewport(SDL_Renderer *renderer, SDL_RenderCommand *cmd
 static bool WIIU_QueueSetDrawColor(SDL_Renderer *renderer, SDL_RenderCommand *cmd);
 static bool WIIU_QueueDrawPoints(SDL_Renderer *renderer, SDL_RenderCommand *cmd, const SDL_FPoint *points, int count);
 static bool WIIU_QueueDrawLines(SDL_Renderer *renderer, SDL_RenderCommand *cmd, const SDL_FPoint *points, int count);
+static bool WIIU_QueueFillRects(SDL_Renderer *renderer, SDL_RenderCommand *cmd, const SDL_FRect *rects, int count);
+static bool WIIU_QueueCopy(SDL_Renderer *renderer, SDL_RenderCommand *cmd, SDL_Texture *texture, const SDL_FRect *srcrect, const SDL_FRect *dstrect);
+static bool WIIU_QueueCopyEx(SDL_Renderer *renderer, SDL_RenderCommand *cmd, SDL_Texture *texture, const SDL_FRect *srcrect, const SDL_FRect *dstrect, const double angle, const SDL_FPoint *center, const SDL_FlipMode flip, float scale_x, float scale_y);
 static bool WIIU_QueueGeometry(SDL_Renderer *renderer, SDL_RenderCommand *cmd, SDL_Texture *texture, const float *xy, int xy_stride, const SDL_FColor *color, int color_stride, const float *uv, int uv_stride, int num_vertices, const void *indices, int num_indices, int size_indices, float scale_x, float scale_y);
 static void WIIU_InvalidateCachedState(SDL_Renderer *renderer);
 static bool WIIU_RunCommandQueue(SDL_Renderer *renderer, SDL_RenderCommand *cmd, void *vertices, size_t vertsize);
@@ -595,7 +599,8 @@ static bool WIIU_EnsureSampler(WIIU_RenderData *data, SDL_ScaleMode scale_mode, 
 
     if (data->sampler_scale_mode == scale_mode &&
         data->sampler_address_u == address_u &&
-        data->sampler_address_v == address_v) {
+        data->sampler_address_v == address_v &&
+        data->sampler_indexed == indexed) {
         return true;
     }
 
@@ -617,7 +622,38 @@ static bool WIIU_EnsureSampler(WIIU_RenderData *data, SDL_ScaleMode scale_mode, 
     data->sampler_scale_mode = scale_mode;
     data->sampler_address_u = address_u;
     data->sampler_address_v = address_v;
+    data->sampler_indexed = indexed;
     return true;
+}
+
+static SDL_FColor WIIU_GetCommandColor(const SDL_RenderCommand *cmd)
+{
+    SDL_FColor color = cmd->data.draw.color;
+
+    color.r *= cmd->data.draw.color_scale;
+    color.g *= cmd->data.draw.color_scale;
+    color.b *= cmd->data.draw.color_scale;
+    return color;
+}
+
+static void WIIU_FillVertex(WIIU_Vertex *vertex, float x, float y, const SDL_FColor *color, float u, float v)
+{
+    vertex->position.x = x;
+    vertex->position.y = y;
+    vertex->color = *color;
+    vertex->tex_coord.x = u;
+    vertex->tex_coord.y = v;
+}
+
+static void WIIU_EmitQuadVertices(WIIU_Vertex *verts, const SDL_FPoint positions[4], const SDL_FPoint tex_coords[4], const SDL_FColor *color)
+{
+    static const Uint8 indices[6] = { 0, 1, 2, 0, 2, 3 };
+    int i;
+
+    for (i = 0; i < SDL_arraysize(indices); ++i) {
+        const Uint8 index = indices[i];
+        WIIU_FillVertex(&verts[i], positions[index].x, positions[index].y, color, tex_coords[index].x, tex_coords[index].y);
+    }
 }
 
 static bool WIIU_SetVertexUniforms(WIIU_RenderData *data, const float *transform)
@@ -658,6 +694,7 @@ static bool WIIU_ApplyDrawState(SDL_Renderer *renderer, SDL_RenderCommand *cmd)
 {
     WIIU_RenderData *data = (WIIU_RenderData *)renderer->internal;
     WIIU_TextureData *texturedata = cmd->data.draw.texture ? (WIIU_TextureData *)cmd->data.draw.texture->internal : NULL;
+    const SDL_ScaleMode scale_mode = texturedata ? cmd->data.draw.texture_scale_mode : SDL_SCALEMODE_NEAREST;
     SDL_Rect viewport = data->viewport;
     GX2ColorBuffer *color_buffer = WIIU_GetCurrentColorBuffer(renderer);
     float transform[4];
@@ -704,7 +741,7 @@ static bool WIIU_ApplyDrawState(SDL_Renderer *renderer, SDL_RenderCommand *cmd)
     }
 
     if (!WIIU_EnsureSampler(data,
-                            cmd->data.draw.texture_scale_mode,
+                            scale_mode,
                             cmd->data.draw.texture_address_mode_u,
                             cmd->data.draw.texture_address_mode_v,
                             texturedata && texturedata->kind == WIIU_TEXTURE_KIND_INDEX8)) {
@@ -1277,6 +1314,160 @@ static bool WIIU_QueueDrawLines(SDL_Renderer *renderer, SDL_RenderCommand *cmd, 
     return true;
 }
 
+static bool WIIU_QueueFillRects(SDL_Renderer *renderer, SDL_RenderCommand *cmd, const SDL_FRect *rects, int count)
+{
+    WIIU_Vertex *verts;
+    const SDL_FColor color = WIIU_GetCommandColor(cmd);
+    int i;
+
+    verts = (WIIU_Vertex *)SDL_AllocateRenderVertices(renderer, (size_t)count * 6 * sizeof(*verts), 0, &cmd->data.draw.first);
+    if (!verts) {
+        return false;
+    }
+
+    cmd->data.draw.count = (size_t)count * 6;
+    for (i = 0; i < count; ++i, verts += 6) {
+        SDL_FPoint positions[4];
+        SDL_FPoint tex_coords[4];
+
+        positions[0].x = rects[i].x;
+        positions[0].y = rects[i].y;
+        positions[1].x = rects[i].x + rects[i].w;
+        positions[1].y = rects[i].y;
+        positions[2].x = rects[i].x + rects[i].w;
+        positions[2].y = rects[i].y + rects[i].h;
+        positions[3].x = rects[i].x;
+        positions[3].y = rects[i].y + rects[i].h;
+
+        SDL_zero(tex_coords);
+        WIIU_EmitQuadVertices(verts, positions, tex_coords, &color);
+    }
+
+    return true;
+}
+
+static bool WIIU_QueueCopy(SDL_Renderer *renderer, SDL_RenderCommand *cmd, SDL_Texture *texture, const SDL_FRect *srcrect, const SDL_FRect *dstrect)
+{
+    WIIU_Vertex *verts;
+    const SDL_FColor color = WIIU_GetCommandColor(cmd);
+    const float minu = srcrect->x / texture->w;
+    const float minv = srcrect->y / texture->h;
+    const float maxu = (srcrect->x + srcrect->w) / texture->w;
+    const float maxv = (srcrect->y + srcrect->h) / texture->h;
+    SDL_FPoint positions[4];
+    SDL_FPoint tex_coords[4];
+
+    verts = (WIIU_Vertex *)SDL_AllocateRenderVertices(renderer, 6 * sizeof(*verts), 0, &cmd->data.draw.first);
+    if (!verts) {
+        return false;
+    }
+
+    positions[0].x = dstrect->x;
+    positions[0].y = dstrect->y;
+    positions[1].x = dstrect->x + dstrect->w;
+    positions[1].y = dstrect->y;
+    positions[2].x = dstrect->x + dstrect->w;
+    positions[2].y = dstrect->y + dstrect->h;
+    positions[3].x = dstrect->x;
+    positions[3].y = dstrect->y + dstrect->h;
+
+    tex_coords[0].x = minu;
+    tex_coords[0].y = minv;
+    tex_coords[1].x = maxu;
+    tex_coords[1].y = minv;
+    tex_coords[2].x = maxu;
+    tex_coords[2].y = maxv;
+    tex_coords[3].x = minu;
+    tex_coords[3].y = maxv;
+
+    cmd->data.draw.count = 6;
+    WIIU_EmitQuadVertices(verts, positions, tex_coords, &color);
+    return true;
+}
+
+static bool WIIU_QueueCopyEx(SDL_Renderer *renderer, SDL_RenderCommand *cmd, SDL_Texture *texture, const SDL_FRect *srcrect, const SDL_FRect *dstrect, const double angle, const SDL_FPoint *center, const SDL_FlipMode flip, float scale_x, float scale_y)
+{
+    WIIU_Vertex *verts;
+    const SDL_FColor color = WIIU_GetCommandColor(cmd);
+    const float minu = srcrect->x / texture->w;
+    const float minv = srcrect->y / texture->h;
+    const float maxu = (srcrect->x + srcrect->w) / texture->w;
+    const float maxv = (srcrect->y + srcrect->h) / texture->h;
+    const float actual_center_x = center ? center->x : (dstrect->w * 0.5f);
+    const float actual_center_y = center ? center->y : (dstrect->h * 0.5f);
+    const float centerx = actual_center_x + dstrect->x;
+    const float centery = actual_center_y + dstrect->y;
+    const float radian_angle = (float)((SDL_PI_D * angle) / 180.0);
+    const float s = SDL_sinf(radian_angle);
+    const float c = SDL_cosf(radian_angle);
+    float minx;
+    float miny;
+    float maxx;
+    float maxy;
+    float s_minx;
+    float s_miny;
+    float s_maxx;
+    float s_maxy;
+    float c_minx;
+    float c_miny;
+    float c_maxx;
+    float c_maxy;
+    SDL_FPoint positions[4];
+    SDL_FPoint tex_coords[4];
+
+    verts = (WIIU_Vertex *)SDL_AllocateRenderVertices(renderer, 6 * sizeof(*verts), 0, &cmd->data.draw.first);
+    if (!verts) {
+        return false;
+    }
+
+    if (flip & SDL_FLIP_HORIZONTAL) {
+        minx = dstrect->x + dstrect->w;
+        maxx = dstrect->x;
+    } else {
+        minx = dstrect->x;
+        maxx = dstrect->x + dstrect->w;
+    }
+
+    if (flip & SDL_FLIP_VERTICAL) {
+        miny = dstrect->y + dstrect->h;
+        maxy = dstrect->y;
+    } else {
+        miny = dstrect->y;
+        maxy = dstrect->y + dstrect->h;
+    }
+
+    tex_coords[0].x = minu;
+    tex_coords[0].y = minv;
+    tex_coords[1].x = maxu;
+    tex_coords[1].y = minv;
+    tex_coords[2].x = maxu;
+    tex_coords[2].y = maxv;
+    tex_coords[3].x = minu;
+    tex_coords[3].y = maxv;
+
+    s_minx = s * (minx - centerx);
+    s_miny = s * (miny - centery);
+    s_maxx = s * (maxx - centerx);
+    s_maxy = s * (maxy - centery);
+    c_minx = c * (minx - centerx);
+    c_miny = c * (miny - centery);
+    c_maxx = c * (maxx - centerx);
+    c_maxy = c * (maxy - centery);
+
+    positions[0].x = ((c_minx - s_miny) + centerx) * scale_x;
+    positions[0].y = ((s_minx + c_miny) + centery) * scale_y;
+    positions[1].x = ((c_maxx - s_miny) + centerx) * scale_x;
+    positions[1].y = ((s_maxx + c_miny) + centery) * scale_y;
+    positions[2].x = ((c_maxx - s_maxy) + centerx) * scale_x;
+    positions[2].y = ((s_maxx + c_maxy) + centery) * scale_y;
+    positions[3].x = ((c_minx - s_maxy) + centerx) * scale_x;
+    positions[3].y = ((s_minx + c_maxy) + centery) * scale_y;
+
+    cmd->data.draw.count = 6;
+    WIIU_EmitQuadVertices(verts, positions, tex_coords, &color);
+    return true;
+}
+
 static bool WIIU_QueueGeometry(SDL_Renderer *renderer, SDL_RenderCommand *cmd, SDL_Texture *texture, const float *xy, int xy_stride, const SDL_FColor *color, int color_stride, const float *uv, int uv_stride, int num_vertices, const void *indices, int num_indices, int size_indices, float scale_x, float scale_y)
 {
     WIIU_Vertex *verts;
@@ -1348,6 +1539,7 @@ static void WIIU_InvalidateCachedState(SDL_Renderer *renderer)
     data->sampler_scale_mode = SDL_SCALEMODE_INVALID;
     data->sampler_address_u = SDL_TEXTURE_ADDRESS_INVALID;
     data->sampler_address_v = SDL_TEXTURE_ADDRESS_INVALID;
+    data->sampler_indexed = false;
 }
 
 static bool WIIU_RunCommandQueue(SDL_Renderer *renderer, SDL_RenderCommand *cmd, void *vertices, size_t vertsize)
@@ -1419,6 +1611,9 @@ static bool WIIU_RunCommandQueue(SDL_Renderer *renderer, SDL_RenderCommand *cmd,
 
         case SDL_RENDERCMD_DRAW_POINTS:
         case SDL_RENDERCMD_DRAW_LINES:
+        case SDL_RENDERCMD_FILL_RECTS:
+        case SDL_RENDERCMD_COPY:
+        case SDL_RENDERCMD_COPY_EX:
         case SDL_RENDERCMD_GEOMETRY:
             if (!WIIU_ApplyDrawState(renderer, cmd)) {
                 return false;
@@ -1430,9 +1625,6 @@ static bool WIIU_RunCommandQueue(SDL_Renderer *renderer, SDL_RenderCommand *cmd,
             break;
 
         case SDL_RENDERCMD_NO_OP:
-        case SDL_RENDERCMD_FILL_RECTS:
-        case SDL_RENDERCMD_COPY:
-        case SDL_RENDERCMD_COPY_EX:
             break;
         }
 
@@ -1750,6 +1942,9 @@ static bool WIIU_CreateRenderer(SDL_Renderer *renderer, SDL_Window *window, SDL_
     renderer->QueueSetDrawColor = WIIU_QueueSetDrawColor;
     renderer->QueueDrawPoints = WIIU_QueueDrawPoints;
     renderer->QueueDrawLines = WIIU_QueueDrawLines;
+    renderer->QueueFillRects = WIIU_QueueFillRects;
+    renderer->QueueCopy = WIIU_QueueCopy;
+    renderer->QueueCopyEx = WIIU_QueueCopyEx;
     renderer->QueueGeometry = WIIU_QueueGeometry;
     renderer->InvalidateCachedState = WIIU_InvalidateCachedState;
     renderer->RunCommandQueue = WIIU_RunCommandQueue;
