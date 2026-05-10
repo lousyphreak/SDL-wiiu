@@ -70,7 +70,6 @@ static void SDL_WIIU_GetWindowSizeInPixels(SDL_VideoDevice *_this, SDL_Window *w
 static float SDL_WIIU_GetWindowContentScale(SDL_VideoDevice *_this, SDL_Window *window);
 static bool SDL_WIIU_StartTextInput(SDL_VideoDevice *_this, SDL_Window *window, SDL_PropertiesID props);
 static bool SDL_WIIU_StopTextInput(SDL_VideoDevice *_this, SDL_Window *window);
-static bool SDL_WIIU_HasScreenKeyboardSupport(SDL_VideoDevice *_this);
 
 static void SDL_WIIU_ForegroundAcquired(void *userdata);
 static void SDL_WIIU_ForegroundReleased(void *userdata);
@@ -498,6 +497,7 @@ static SDL_VideoDevice *SDL_WIIU_CreateDevice(void)
     device->StartTextInput = SDL_WIIU_StartTextInput;
     device->StopTextInput = SDL_WIIU_StopTextInput;
     device->HasScreenKeyboardSupport = SDL_WIIU_HasScreenKeyboardSupport;
+    device->ShowMessageBox = SDL_WIIU_ShowMessageBox;
     device->CreateWindowFramebuffer = SDL_WIIU_CreateWindowFramebuffer;
     device->SetWindowFramebufferVSync = SDL_WIIU_SetWindowFramebufferVSync;
     device->GetWindowFramebufferVSync = SDL_WIIU_GetWindowFramebufferVSync;
@@ -966,6 +966,7 @@ static void SDL_WIIU_VideoQuit(SDL_VideoDevice *_this)
     SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO, "WiiU video: running foreground-owned video shutdown");
     SDL_WIIU_QuitFramebufferRenderer(_this);
     SDL_WIIU_QuitKeyboard();
+    SDL_WIIU_QuitTextUI();
     if (driverdata->mouse_initialized) {
         SDL_WIIU_QuitMouse();
         driverdata->mouse_initialized = false;
@@ -1141,10 +1142,8 @@ static float SDL_WIIU_GetWindowContentScale(SDL_VideoDevice *_this, SDL_Window *
 
 static bool SDL_WIIU_StartTextInput(SDL_VideoDevice *_this, SDL_Window *window, SDL_PropertiesID props)
 {
-    (void)_this;
     (void)window;
-    (void)props;
-    return true;
+    return SDL_WIIU_ShowTextInput(_this, props);
 }
 
 static bool SDL_WIIU_StopTextInput(SDL_VideoDevice *_this, SDL_Window *window)
@@ -1152,12 +1151,6 @@ static bool SDL_WIIU_StopTextInput(SDL_VideoDevice *_this, SDL_Window *window)
     (void)_this;
     (void)window;
     return true;
-}
-
-static bool SDL_WIIU_HasScreenKeyboardSupport(SDL_VideoDevice *_this)
-{
-    (void)_this;
-    return false;
 }
 
 #endif // SDL_VIDEO_DRIVER_WIIU

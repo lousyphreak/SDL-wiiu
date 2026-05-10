@@ -3649,6 +3649,7 @@ elseif(WIIU)
     endif()
     sdl_glob_sources(
       "${SDL3_SOURCE_DIR}/src/video/wiiu/*.c"
+      "${SDL3_SOURCE_DIR}/src/video/wiiu/*.cpp"
       "${SDL3_SOURCE_DIR}/src/video/wiiu/*.h"
     )
     set(HAVE_SDL_VIDEO TRUE)
@@ -3725,6 +3726,9 @@ elseif(WIIU)
     set(SDL_POWER_HARDWIRED 1)
     set(HAVE_SDL_POWER TRUE)
   endif()
+
+  sdl_glob_sources("${SDL3_SOURCE_DIR}/src/misc/wiiu/*.c")
+  set(HAVE_SDL_MISC TRUE)
 
   if(SDL_CAMERA)
     set(SDL_CAMERA_DRIVER_WIIU 1)

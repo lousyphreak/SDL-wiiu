@@ -150,4 +150,17 @@ extern void SDL_WIIU_SuspendMouse(void);
 extern bool SDL_WIIU_InitKeyboard(SDL_VideoDevice *_this);
 extern void SDL_WIIU_QuitKeyboard(void);
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+extern bool SDL_WIIU_HasScreenKeyboardSupport(SDL_VideoDevice *_this);
+extern bool SDL_WIIU_ShowTextInput(SDL_VideoDevice *_this, SDL_PropertiesID props);
+extern bool SDL_WIIU_ShowMessageBox(SDL_VideoDevice *_this, const SDL_MessageBoxData *messageboxdata, int *buttonID);
+extern void SDL_WIIU_QuitTextUI(void);
+
+#ifdef __cplusplus
+}
+#endif
+
 #endif // SDL_wiiuvideo_h_
