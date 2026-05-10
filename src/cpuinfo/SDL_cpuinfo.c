@@ -99,6 +99,12 @@
 #include <kernel/OS.h>
 #endif
 
+#ifdef SDL_PLATFORM_WIIU
+#include <coreinit/core.h>
+#include <coreinit/memory.h>
+#include <coreinit/memorymap.h>
+#endif
+
 #define CPU_HAS_ALTIVEC  (1 << 0)
 #define CPU_HAS_MMX      (1 << 1)
 #define CPU_HAS_SSE      (1 << 2)
@@ -655,6 +661,11 @@ static int SDL_NumLogicalCPUCores = 0;
 int SDL_GetNumLogicalCPUCores(void)
 {
     if (!SDL_NumLogicalCPUCores) {
+#ifdef SDL_PLATFORM_WIIU
+        if (SDL_NumLogicalCPUCores <= 0) {
+            SDL_NumLogicalCPUCores = (int)OSGetCoreCount();
+        }
+#endif
 #if defined(HAVE_SYSCONF) && defined(_SC_NPROCESSORS_ONLN)
         if (SDL_NumLogicalCPUCores <= 0) {
             SDL_NumLogicalCPUCores = (int)sysconf(_SC_NPROCESSORS_ONLN);
@@ -883,6 +894,9 @@ static const char *SDL_GetCPUName(void)
 
 int SDL_GetCPUCacheLineSize(void)
 {
+#ifdef SDL_PLATFORM_WIIU
+    return 32;
+#else
     const char *cpuType = SDL_GetCPUType();
     int cacheline_size = SDL_CACHELINE_SIZE; // initial guess
     int a, b, c, d;
@@ -920,6 +934,7 @@ int SDL_GetCPUCacheLineSize(void)
 #endif
     }
     return cacheline_size;
+#endif
 }
 
 #define SDL_CPUFEATURES_RESET_VALUE 0xFFFFFFFF
@@ -1160,6 +1175,15 @@ static int SDL_SystemRAM = 0;
 int SDL_GetSystemRAM(void)
 {
     if (!SDL_SystemRAM) {
+#ifdef SDL_PLATFORM_WIIU
+        if (SDL_SystemRAM <= 0) {
+            uint32_t mem2_addr = 0, mem2_size = 0;
+
+            if (OSGetMemBound(OS_MEM2, &mem2_addr, &mem2_size) == 0) {
+                SDL_SystemRAM = (int)((Uint64)mem2_size / (1024 * 1024));
+            }
+        }
+#endif
 #if defined(HAVE_SYSCONF) && defined(_SC_PHYS_PAGES) && defined(_SC_PAGESIZE)
         if (SDL_SystemRAM <= 0) {
             SDL_SystemRAM = (int)((Sint64)sysconf(_SC_PHYS_PAGES) * sysconf(_SC_PAGESIZE) / (1024 * 1024));
@@ -1245,6 +1269,9 @@ static int SDL_SystemPageSize = -1;
 int SDL_GetSystemPageSize(void)
 {
     if (SDL_SystemPageSize == -1) {
+#ifdef SDL_PLATFORM_WIIU
+        SDL_SystemPageSize = OS_PAGE_SIZE;
+#endif
 #ifdef SDL_PLATFORM_SYSTEM_PAGE_SIZE_PRIVATE  // consoles will define this in a platform-specific internal header.
         SDL_SystemPageSize = SDL_PLATFORM_SYSTEM_PAGE_SIZE_PRIVATE;
 #endif

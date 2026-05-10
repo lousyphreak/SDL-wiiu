@@ -3721,6 +3721,11 @@ elseif(WIIU)
   sdl_glob_sources("${SDL3_SOURCE_DIR}/src/timer/wiiu/*.c")
   set(HAVE_SDL_TIMERS TRUE)
 
+  if(SDL_POWER)
+    set(SDL_POWER_HARDWIRED 1)
+    set(HAVE_SDL_POWER TRUE)
+  endif()
+
   if(SDL_CAMERA)
     set(SDL_CAMERA_DRIVER_WIIU 1)
     set(HAVE_CAMERA TRUE)
