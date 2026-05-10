@@ -35,6 +35,9 @@
 #define WIIU_NUNCHUK_NAME "Nintendo Wii Remote + Nunchuk"
 #define WIIU_MAX_DEVICES (1 + WIIU_MAX_KPAD_CHANNELS)
 #define WIIU_SENSOR_RATE_HZ 100.0f
+#define WIIU_DRC_RUMBLE_PATTERN_BITS 120
+#define WIIU_DRC_RUMBLE_PATTERN_BYTES (WIIU_DRC_RUMBLE_PATTERN_BITS / 8)
+#define WIIU_DRC_RUMBLE_REQUEUE_MS 500
 
 typedef enum WIIUDeviceSource
 {
@@ -116,6 +119,7 @@ typedef struct joystick_hwdata
     float touch_x;
     float touch_y;
     float touch_pressure;
+    Uint64 drc_rumble_next_update;
     SDL_PowerState battery_state;
     int battery_percent;
 } joystick_hwdata;
@@ -283,33 +287,50 @@ static bool SDL_WIIU_FamilyHasRumble(WIIUDeviceFamily family)
     }
 }
 
-static uint8_t SDL_WIIU_BuildDRCRumblePattern(Uint16 low_frequency_rumble, Uint16 high_frequency_rumble, uint8_t *pattern, uint8_t length)
+static uint8_t SDL_WIIU_BuildDRCRumblePattern(Uint16 low_frequency_rumble, Uint16 high_frequency_rumble, uint8_t *pattern, size_t pattern_size)
 {
     const Uint32 intensity = SDL_max((Uint32)low_frequency_rumble, (Uint32)high_frequency_rumble);
     Uint32 accumulator = 0;
     uint8_t active_samples = 0;
     uint8_t i;
+    const uint8_t bit_length = (uint8_t)SDL_min(pattern_size * 8, (size_t)WIIU_DRC_RUMBLE_PATTERN_BITS);
 
-    if (!pattern || length == 0 || intensity == 0) {
+    if (!pattern || pattern_size == 0 || intensity == 0 || bit_length == 0) {
         return 0;
     }
 
-    for (i = 0; i < length; ++i) {
+    /* VPAD consumes a 120 Hz bitstream, not a byte-per-sample pattern. */
+    SDL_memset(pattern, 0, pattern_size);
+    for (i = 0; i < bit_length; ++i) {
         accumulator += intensity;
         if (accumulator >= 0x10000u) {
-            pattern[i] = 0xFF;
+            pattern[i / 8] |= (uint8_t)(1u << (i % 8));
             accumulator -= 0x10000u;
             ++active_samples;
-        } else {
-            pattern[i] = 0x00;
         }
     }
 
     if (active_samples == 0) {
-        pattern[0] = 0xFF;
+        pattern[0] = 0x01;
     }
 
-    return length;
+    return bit_length;
+}
+
+static void SDL_WIIU_ScheduleDRCRumbleUpdate(joystick_hwdata *hwdata, Uint64 now)
+{
+    hwdata->drc_rumble_next_update = now + WIIU_DRC_RUMBLE_REQUEUE_MS;
+    if (hwdata->drc_rumble_next_update == 0) {
+        hwdata->drc_rumble_next_update = 1;
+    }
+}
+
+static bool SDL_WIIU_QueueDRCRumble(Uint16 low_frequency_rumble, Uint16 high_frequency_rumble)
+{
+    uint8_t pattern[WIIU_DRC_RUMBLE_PATTERN_BYTES];
+    const uint8_t length = SDL_WIIU_BuildDRCRumblePattern(low_frequency_rumble, high_frequency_rumble,
+                                                          pattern, SDL_arraysize(pattern));
+    return (length > 0 && VPADControlMotor(VPAD_CHAN_0, pattern, length) >= 0);
 }
 
 static void SDL_WIIU_AddSensorsForFamily(SDL_Joystick *joystick, WIIUDeviceFamily family)
@@ -857,12 +878,18 @@ static bool WIIU_JoystickRumble(SDL_Joystick *joystick, Uint16 low_frequency_rum
 
     if (hwdata->source == WIIU_DEVICE_SOURCE_DRC) {
         if (active) {
-            uint8_t pattern[8];
-            const uint8_t length = SDL_WIIU_BuildDRCRumblePattern(low_frequency_rumble, high_frequency_rumble,
-                                                                  pattern, (uint8_t)SDL_arraysize(pattern));
-            return (length > 0 && VPADControlMotor(VPAD_CHAN_0, pattern, length) >= 0);
+            const Uint64 now = SDL_GetTicks();
+
+            if (!SDL_WIIU_QueueDRCRumble(low_frequency_rumble, high_frequency_rumble)) {
+                hwdata->drc_rumble_next_update = 0;
+                return false;
+            }
+
+            SDL_WIIU_ScheduleDRCRumbleUpdate(hwdata, now);
+            return true;
         }
 
+        hwdata->drc_rumble_next_update = 0;
         VPADStopMotor(VPAD_CHAN_0);
         return true;
     }
@@ -1069,6 +1096,25 @@ static void SDL_WIIU_UpdateKPAD(SDL_Joystick *joystick, joystick_hwdata *hwdata)
     }
 }
 
+static void SDL_WIIU_UpdateDRCRumble(SDL_Joystick *joystick, joystick_hwdata *hwdata)
+{
+    const Uint64 now = SDL_GetTicks();
+
+    if (!joystick->low_frequency_rumble && !joystick->high_frequency_rumble) {
+        hwdata->drc_rumble_next_update = 0;
+        return;
+    }
+
+    /* SDL's generic rumble resend cadence is longer than a single VPAD pattern. */
+    if (hwdata->drc_rumble_next_update != 0 && now >= hwdata->drc_rumble_next_update) {
+        if (SDL_WIIU_QueueDRCRumble(joystick->low_frequency_rumble, joystick->high_frequency_rumble)) {
+            SDL_WIIU_ScheduleDRCRumbleUpdate(hwdata, now);
+        } else {
+            hwdata->drc_rumble_next_update = 0;
+        }
+    }
+}
+
 static void WIIU_JoystickUpdate(SDL_Joystick *joystick)
 {
     joystick_hwdata *hwdata = joystick->hwdata;
@@ -1083,6 +1129,7 @@ static void WIIU_JoystickUpdate(SDL_Joystick *joystick)
 
     if (hwdata->source == WIIU_DEVICE_SOURCE_DRC) {
         SDL_WIIU_UpdateDRC(joystick, hwdata);
+        SDL_WIIU_UpdateDRCRumble(joystick, hwdata);
     } else {
         SDL_WIIU_UpdateKPAD(joystick, hwdata);
     }
@@ -1098,6 +1145,7 @@ static void WIIU_JoystickClose(SDL_Joystick *joystick)
 
     if (SDL_WIIU_FamilyHasRumble(hwdata->family)) {
         if (hwdata->source == WIIU_DEVICE_SOURCE_DRC) {
+            hwdata->drc_rumble_next_update = 0;
             VPADStopMotor(VPAD_CHAN_0);
         } else {
             WPADControlMotor((WPADChan)hwdata->channel, FALSE);
