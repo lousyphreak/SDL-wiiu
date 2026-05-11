@@ -34,7 +34,7 @@
 // is #defined to 0 instead and implement the SDL_SYS_* functions below in your
 // backend (having them maybe call into the SDL_SYS_*_Generic versions as a
 // fallback if the platform has functionality that isn't always available).
-#if defined(HAVE_LIBURING_H) || defined(HAVE_IORINGAPI_H)
+#if defined(HAVE_LIBURING_H) || defined(HAVE_IORINGAPI_H) || defined(SDL_PLATFORM_WIIU)
 #define SDL_ASYNCIO_ONLY_HAVE_GENERIC 0
 #else
 #define SDL_ASYNCIO_ONLY_HAVE_GENERIC 1
@@ -77,6 +77,9 @@ struct SDL_AsyncIOTask
     bool flush;
     void *buffer;
     char *error;
+#ifdef SDL_PLATFORM_WIIU
+    void *backenddata;
+#endif
     SDL_AsyncIOResult result;
     Uint64 requested_size;
     Uint64 result_size;

@@ -25,6 +25,8 @@
 
 #ifdef SDL_PLATFORM_WIIU
 
+#include <coreinit/filesystem.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -34,7 +36,9 @@ typedef struct SDL_WIIUFile SDL_WIIUFile;
 extern char *SDL_WIIU_GetBasePath(void);
 extern char *SDL_WIIU_GetCurrentDirectory(void);
 extern char *SDL_WIIU_GetPrefPath(const char *org, const char *app);
+extern char *SDL_WIIU_ResolveFSPath(const char *path);
 extern bool SDL_WIIU_EnumerateDirectory(const char *path, SDL_EnumerateDirectoryCallback cb, void *userdata);
+extern bool SDL_WIIU_SetFSError(const char *what, FSStatus status);
 extern bool SDL_WIIU_GetPathInfo(const char *path, SDL_PathInfo *info);
 extern bool SDL_WIIU_CreateDirectory(const char *path);
 extern bool SDL_WIIU_RemovePath(const char *path);

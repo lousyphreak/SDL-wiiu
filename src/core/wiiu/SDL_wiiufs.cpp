@@ -122,7 +122,7 @@ static const char *SDL_WIIU_FSStatusString(FSStatus status)
     }
 }
 
-static bool SDL_WIIU_SetFSError(const char *what, FSStatus status)
+extern "C" bool SDL_WIIU_SetFSError(const char *what, FSStatus status)
 {
     return SDL_SetError("%s failed: %s (%d)", what, SDL_WIIU_FSStatusString(status), (int) status);
 }
@@ -454,6 +454,15 @@ extern "C" char *SDL_WIIU_GetBasePath(void)
 extern "C" char *SDL_WIIU_GetCurrentDirectory(void)
 {
     return SDL_strdup(SDL_WIIU_CONTENT_ROOT);
+}
+
+extern "C" char *SDL_WIIU_ResolveFSPath(const char *path)
+{
+    char *resolved = NULL;
+    if (!SDL_WIIU_ResolvePath(path, &resolved)) {
+        return NULL;
+    }
+    return resolved;
 }
 
 extern "C" char *SDL_WIIU_GetPrefPath(const char *org, const char *app)
