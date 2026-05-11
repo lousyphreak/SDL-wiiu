@@ -35,6 +35,8 @@
 #include <gx2r/buffer.h>
 
 #define WIIU_SCAN_BUFFER_COUNT 2
+#define SDL_WIIU_PRESENT_OUTPUT_TV 0x1u
+#define SDL_WIIU_PRESENT_OUTPUT_DRC 0x2u
 
 typedef enum SDL_WiiUDisplayKind
 {
@@ -96,6 +98,7 @@ struct SDL_VideoData
     bool mouse_initialized;
     bool drc_connected;
     bool drc_uses_tv_render_buffer;
+    Uint32 pending_present_mask;
     Uint32 foreground_generation;
     SDL_WiiUScanTarget tv;
     SDL_WiiUScanTarget drc;
@@ -137,6 +140,9 @@ extern SDL_Window *SDL_WIIU_GetOutputWindow(SDL_VideoDevice *_this, SDL_WiiUDisp
 extern bool SDL_WIIU_UpdateOutputWindows(SDL_VideoDevice *_this);
 extern void SDL_WIIU_GetPresentationRect(int src_w, int src_h, int dst_w, int dst_h, SDL_Rect *rect);
 extern void SDL_WIIU_GetWindowPresentationSize(SDL_VideoDevice *_this, SDL_Window *window, int *w, int *h);
+extern Uint32 SDL_WIIU_GetPresentOutputMask(SDL_VideoDevice *_this);
+extern bool SDL_WIIU_ShouldSwapPresent(SDL_VideoDevice *_this, Uint32 rendered_outputs);
+extern void SDL_WIIU_ResetPresentState(SDL_VideoDevice *_this);
 
 extern void SDL_WIIU_InitTouch(void);
 extern void SDL_WIIU_QuitTouch(void);

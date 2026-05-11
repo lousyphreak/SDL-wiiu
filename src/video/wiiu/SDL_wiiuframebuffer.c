@@ -323,6 +323,7 @@ bool SDL_WIIU_UpdateWindowFramebuffer(SDL_VideoDevice *_this, SDL_Window *window
     const bool render_tv = SDL_WIIU_GetOutputWindow(_this, SDL_WIIU_DISPLAY_TV) == window;
     const bool render_drc = driverdata->drc_connected && (SDL_WIIU_GetOutputWindow(_this, SDL_WIIU_DISPLAY_DRC) == window);
     const bool mirror_drc_from_tv = driverdata->drc_uses_tv_render_buffer && render_tv && render_drc;
+    Uint32 rendered_outputs = 0;
 
     (void)rects;
     (void)numrects;
@@ -357,11 +358,18 @@ bool SDL_WIIU_UpdateWindowFramebuffer(SDL_VideoDevice *_this, SDL_Window *window
     SDL_WIIU_BeginRender();
     if (render_tv && tv_target->scan_buffer) {
         SDL_WIIU_RenderWindowToTarget(driverdata, window, surface, tv_target, GX2_SCAN_TARGET_TV);
+        rendered_outputs |= SDL_WIIU_PRESENT_OUTPUT_TV;
     }
     if (mirror_drc_from_tv && tv_target->scan_buffer && drc_target->scan_buffer) {
         GX2CopyColorBufferToScanBuffer(&tv_target->color_buffer, GX2_SCAN_TARGET_DRC);
+        rendered_outputs |= SDL_WIIU_PRESENT_OUTPUT_DRC;
     } else if (render_drc && drc_target->scan_buffer) {
         SDL_WIIU_RenderWindowToTarget(driverdata, window, surface, drc_target, GX2_SCAN_TARGET_DRC);
+        rendered_outputs |= SDL_WIIU_PRESENT_OUTPUT_DRC;
+    }
+
+    if (!SDL_WIIU_ShouldSwapPresent(_this, rendered_outputs)) {
+        return true;
     }
 
     GX2SwapScanBuffers();

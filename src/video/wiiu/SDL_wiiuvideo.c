@@ -143,6 +143,65 @@ SDL_Window *SDL_WIIU_GetOutputWindow(SDL_VideoDevice *_this, SDL_WiiUDisplayKind
     return shared_window;
 }
 
+Uint32 SDL_WIIU_GetPresentOutputMask(SDL_VideoDevice *_this)
+{
+    SDL_VideoData *driverdata;
+    Uint32 mask = 0;
+
+    if (!_this || !_this->internal) {
+        return 0;
+    }
+
+    driverdata = (SDL_VideoData *)_this->internal;
+    if (SDL_WIIU_GetOutputWindow(_this, SDL_WIIU_DISPLAY_TV) && driverdata->tv.scan_buffer) {
+        mask |= SDL_WIIU_PRESENT_OUTPUT_TV;
+    }
+    if (driverdata->drc_connected &&
+        SDL_WIIU_GetOutputWindow(_this, SDL_WIIU_DISPLAY_DRC) &&
+        driverdata->drc.scan_buffer) {
+        mask |= SDL_WIIU_PRESENT_OUTPUT_DRC;
+    }
+
+    return mask;
+}
+
+bool SDL_WIIU_ShouldSwapPresent(SDL_VideoDevice *_this, Uint32 rendered_outputs)
+{
+    SDL_VideoData *driverdata;
+    const Uint32 expected_outputs = SDL_WIIU_GetPresentOutputMask(_this);
+
+    if (!_this || !_this->internal || !expected_outputs) {
+        return false;
+    }
+
+    driverdata = (SDL_VideoData *)_this->internal;
+    rendered_outputs &= expected_outputs;
+    if (!rendered_outputs) {
+        return false;
+    }
+
+    driverdata->pending_present_mask &= expected_outputs;
+    driverdata->pending_present_mask |= rendered_outputs;
+    if ((driverdata->pending_present_mask & expected_outputs) != expected_outputs) {
+        return false;
+    }
+
+    driverdata->pending_present_mask = 0;
+    return true;
+}
+
+void SDL_WIIU_ResetPresentState(SDL_VideoDevice *_this)
+{
+    SDL_VideoData *driverdata;
+
+    if (!_this || !_this->internal) {
+        return;
+    }
+
+    driverdata = (SDL_VideoData *)_this->internal;
+    driverdata->pending_present_mask = 0;
+}
+
 void SDL_WIIU_GetPresentationRect(int src_w, int src_h, int dst_w, int dst_h, SDL_Rect *rect)
 {
     SDL_zero(*rect);
@@ -447,6 +506,7 @@ bool SDL_WIIU_UpdateOutputWindows(SDL_VideoDevice *_this)
     driverdata->drc.scan_width = drc_scan_width;
     driverdata->drc.scan_height = drc_scan_height;
     driverdata->drc.drc_render_mode = drc_render_mode;
+    driverdata->pending_present_mask = 0;
 
     if (need_rebuild && driverdata->foreground_ready) {
         SDL_WIIU_ForegroundReleased(_this);
@@ -788,6 +848,7 @@ static void SDL_WIIU_DestroyForegroundResources(SDL_VideoData *driverdata)
                 driverdata->foreground_ready ? 1 : 0,
                 driverdata->tv.scan_buffer,
                 driverdata->drc.scan_buffer);
+    driverdata->pending_present_mask = 0;
     SDL_WIIU_ClearScanTarget(&driverdata->tv);
     SDL_WIIU_ClearScanTarget(&driverdata->drc);
     SDL_WIIU_DestroyMEM1Heap(driverdata);
@@ -901,6 +962,7 @@ static void SDL_WIIU_DRCConnectCallback(uint32_t drc_slot, BOOL attached)
 
     driverdata = (SDL_VideoData *)_this->internal;
     driverdata->drc_connected = attached ? true : false;
+    driverdata->pending_present_mask = 0;
     SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO,
                 "WiiU video: DRC callback (slot=%u, attached=%d, foreground=%d)",
                 (unsigned int)drc_slot,
@@ -1064,6 +1126,7 @@ static bool SDL_WIIU_SetDisplayMode(SDL_VideoDevice *_this, SDL_VideoDisplay *di
 static bool SDL_WIIU_CreateWindow(SDL_VideoDevice *_this, SDL_Window *window, SDL_PropertiesID create_props)
 {
     SDL_Window *other = NULL;
+    SDL_DisplayID target_display_id;
     SDL_DisplayData *displaydata;
     SDL_WindowData *windowdata;
     int active_window_count = 0;
@@ -1081,7 +1144,12 @@ static bool SDL_WIIU_CreateWindow(SDL_VideoDevice *_this, SDL_Window *window, SD
         return SDL_SetError("Wii U video supports at most two top-level windows");
     }
 
-    displaydata = SDL_GetDisplayDriverDataForWindow(window);
+    target_display_id = window->pending_displayID ? window->pending_displayID : window->displayID;
+    if (!target_display_id) {
+        target_display_id = SDL_GetPrimaryDisplay();
+    }
+
+    displaydata = SDL_GetDisplayDriverData(target_display_id);
     if (!displaydata) {
         return SDL_SetError("Unable to resolve the window display");
     }
@@ -1100,7 +1168,7 @@ static bool SDL_WIIU_CreateWindow(SDL_VideoDevice *_this, SDL_Window *window, SD
         }
     }
 
-    windowdata->display_id = window->displayID;
+    windowdata->display_id = target_display_id;
     windowdata->display_kind = displaydata->kind;
     windowdata->role = SDL_WIIU_WINDOW_ROLE_SHARED;
     windowdata->framebuffer_vsync = 1;
@@ -1124,6 +1192,13 @@ static void SDL_WIIU_DestroyWindow(SDL_VideoDevice *_this, SDL_Window *window)
     }
 
     SDL_WIIU_UpdateOutputWindows(_this);
+
+    for (SDL_Window *candidate = _this->windows; candidate; candidate = candidate->next) {
+        if (SDL_WIIU_IsActiveWindow(candidate)) {
+            SDL_SetKeyboardFocus(candidate);
+            break;
+        }
+    }
 }
 
 static SDL_DisplayID SDL_WIIU_GetDisplayForWindow(SDL_VideoDevice *_this, SDL_Window *window)
@@ -1132,7 +1207,7 @@ static SDL_DisplayID SDL_WIIU_GetDisplayForWindow(SDL_VideoDevice *_this, SDL_Wi
     (void)_this;
 
     if (!windowdata) {
-        return SDL_GetPrimaryDisplay();
+        return window->pending_displayID;
     }
     return windowdata->display_id;
 }

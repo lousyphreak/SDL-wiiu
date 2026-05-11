@@ -1708,6 +1708,7 @@ static bool WIIU_RenderPresent(SDL_Renderer *renderer)
     const Uint32 foreground_generation = data->video->foreground_generation;
     const bool first_present_after_acquire = (foreground_generation != 0) && (data->logged_foreground_generation_present != foreground_generation);
     SDL_Rect dstrect;
+    Uint32 rendered_outputs = 0;
 
     if (!SDL_WIIU_IsInForeground()) {
         if (first_present_after_acquire) {
@@ -1754,15 +1755,28 @@ static bool WIIU_RenderPresent(SDL_Renderer *renderer)
         if (!WIIU_RenderToScanTarget(data, tv_target, GX2_SCAN_TARGET_TV, &dstrect)) {
             return false;
         }
+        rendered_outputs |= SDL_WIIU_PRESENT_OUTPUT_TV;
     }
 
     if (mirror_drc_from_tv && tv_target->scan_buffer && drc_target->scan_buffer) {
         GX2CopyColorBufferToScanBuffer(&tv_target->color_buffer, GX2_SCAN_TARGET_DRC);
+        rendered_outputs |= SDL_WIIU_PRESENT_OUTPUT_DRC;
     } else if (render_drc && drc_target->scan_buffer) {
         SDL_WIIU_GetPresentationRect(data->backbuffer_w, data->backbuffer_h, (int)drc_target->render_width, (int)drc_target->render_height, &dstrect);
         if (!WIIU_RenderToScanTarget(data, drc_target, GX2_SCAN_TARGET_DRC, &dstrect)) {
             return false;
         }
+        rendered_outputs |= SDL_WIIU_PRESENT_OUTPUT_DRC;
+    }
+
+    if (!SDL_WIIU_ShouldSwapPresent(data->device, rendered_outputs)) {
+        if (first_present_after_acquire) {
+            data->logged_foreground_generation_present = foreground_generation;
+            SDL_LogInfo(SDL_LOG_CATEGORY_RENDER,
+                        "WiiU render: first present after foreground acquire #%u deferred until the remaining output window presents",
+                        (unsigned int)foreground_generation);
+        }
+        return true;
     }
 
     GX2SwapScanBuffers();
