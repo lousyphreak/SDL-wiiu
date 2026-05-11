@@ -1182,11 +1182,12 @@ extern "C" bool SDL_WIIU_FileClose(SDL_WIIUFile *file)
         return true;
     }
 
-    if (file->writable) {
-        result = SDL_WIIU_FileFlush(file, NULL);
-    }
-
     if (SDL_WIIU_LockFSState()) {
+        /*
+         * Cafe FS already flushes cached file data as part of FSCloseFile().
+         * Calling FSFlushFile() first forces an extra synchronous media flush,
+         * which adds a visible stall to small save writes during startup.
+         */
         close_status = FSCloseFile(&SDL_wiiu_fs_state.fs_client,
                                    &SDL_wiiu_fs_state.fs_cmd_block,
                                    file->handle,
