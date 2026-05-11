@@ -30,6 +30,7 @@
 #include <coreinit/core.h>
 #include <coreinit/foreground.h>
 #include <proc_ui/procui.h>
+#include <sysapp/launch.h>
 
 typedef enum SDL_WiiULifecyclePhase
 {
@@ -45,6 +46,7 @@ typedef struct SDL_WiiULifecycleState
     bool procui_active;
     bool release_acknowledged;
     bool background_notified;
+    bool exit_requested;
     bool has_last_status;
     SDL_WiiULifecyclePhase phase;
     ProcUIStatus last_status;
@@ -124,6 +126,33 @@ static void SDL_WIIUSetExiting(bool send_events)
         SDL_SendQuit();
         SDL_OnApplicationWillTerminate();
     }
+}
+
+static void SDL_WIIURequestSystemExit(void)
+{
+    if (!SDL_wiiu_lifecycle.initialized || !SDL_wiiu_lifecycle.procui_active) {
+        return;
+    }
+
+    if (ProcUIInShutdown()) {
+        SDL_WIIUSetExiting(false);
+        return;
+    }
+
+    if (SDL_wiiu_lifecycle.phase == SDL_WIIU_LIFECYCLE_EXITING || SDL_wiiu_lifecycle.exit_requested) {
+        return;
+    }
+
+    if (SDL_wiiu_lifecycle.phase == SDL_WIIU_LIFECYCLE_BACKGROUND) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_SYSTEM,
+                    "WiiU lifecycle: skipping SYSLaunchMenu() while in background");
+        return;
+    }
+
+    SDL_LogInfo(SDL_LOG_CATEGORY_SYSTEM,
+                "WiiU lifecycle: requesting HOME menu for application exit");
+    SDL_wiiu_lifecycle.exit_requested = true;
+    SYSLaunchMenu();
 }
 
 static void SDL_WIIUReleaseForeground(void)
@@ -217,6 +246,39 @@ static void SDL_WIIUHandleLifecycleStatus(ProcUIStatus status, bool send_exit_ev
     }
 }
 
+static void SDL_WIIU_PumpLifecycleInternal(bool send_exit_events)
+{
+    ProcUIStatus status;
+
+    if (!SDL_wiiu_lifecycle.initialized || !SDL_wiiu_lifecycle.procui_active) {
+        return;
+    }
+
+    if (!OSIsMainCore()) {
+        ProcUISubProcessMessages(TRUE);
+        return;
+    }
+
+    do {
+        status = ProcUIProcessMessages(TRUE);
+        SDL_WIIUHandleLifecycleStatus(status, send_exit_events);
+    } while (status == PROCUI_STATUS_RELEASE_FOREGROUND &&
+             SDL_wiiu_lifecycle.phase != SDL_WIIU_LIFECYCLE_EXITING);
+
+    if (status == PROCUI_STATUS_IN_BACKGROUND &&
+        SDL_wiiu_lifecycle.phase != SDL_WIIU_LIFECYCLE_EXITING) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_SYSTEM, "WiiU lifecycle: waiting in background for foreground restore or exit");
+        do {
+            status = ProcUIProcessMessages(TRUE);
+            SDL_WIIUHandleLifecycleStatus(status, send_exit_events);
+        } while (status == PROCUI_STATUS_IN_BACKGROUND &&
+                 SDL_wiiu_lifecycle.phase != SDL_WIIU_LIFECYCLE_EXITING);
+        SDL_LogInfo(SDL_LOG_CATEGORY_SYSTEM,
+                    "WiiU lifecycle: background wait finished on %s",
+                    SDL_WIIU_GetProcUIStatusName(status));
+    }
+}
+
 bool SDL_WIIU_InitLifecycle(void)
 {
     if (SDL_wiiu_lifecycle.initialized) {
@@ -232,6 +294,31 @@ bool SDL_WIIU_InitLifecycle(void)
     SDL_wiiu_lifecycle.initialized = true;
     SDL_LogInfo(SDL_LOG_CATEGORY_SYSTEM, "WiiU lifecycle: ProcUI initialized");
     return true;
+}
+
+void SDL_WIIU_EnsureSystemExit(void)
+{
+    if (!SDL_wiiu_lifecycle.initialized || !SDL_wiiu_lifecycle.procui_active) {
+        return;
+    }
+
+    if (!OSIsMainCore()) {
+        SDL_LogInfo(SDL_LOG_CATEGORY_SYSTEM,
+                    "WiiU lifecycle: skipping exit request outside the main core");
+        return;
+    }
+
+    if (ProcUIInShutdown()) {
+        SDL_WIIUSetExiting(false);
+        return;
+    }
+
+    SDL_WIIURequestSystemExit();
+
+    if (SDL_wiiu_lifecycle.exit_requested &&
+        SDL_wiiu_lifecycle.phase != SDL_WIIU_LIFECYCLE_EXITING) {
+        SDL_WIIU_PumpLifecycleInternal(false);
+    }
 }
 
 void SDL_WIIU_QuitLifecycle(void)
@@ -252,35 +339,7 @@ void SDL_WIIU_QuitLifecycle(void)
 
 void SDL_WIIU_PumpLifecycle(void)
 {
-    ProcUIStatus status;
-
-    if (!SDL_wiiu_lifecycle.initialized || !SDL_wiiu_lifecycle.procui_active) {
-        return;
-    }
-
-    if (!OSIsMainCore()) {
-        ProcUISubProcessMessages(TRUE);
-        return;
-    }
-
-    do {
-        status = ProcUIProcessMessages(TRUE);
-        SDL_WIIUHandleLifecycleStatus(status, true);
-    } while (status == PROCUI_STATUS_RELEASE_FOREGROUND &&
-             SDL_wiiu_lifecycle.phase != SDL_WIIU_LIFECYCLE_EXITING);
-
-    if (status == PROCUI_STATUS_IN_BACKGROUND &&
-        SDL_wiiu_lifecycle.phase != SDL_WIIU_LIFECYCLE_EXITING) {
-        SDL_LogInfo(SDL_LOG_CATEGORY_SYSTEM, "WiiU lifecycle: waiting in background for foreground restore or exit");
-        do {
-            status = ProcUIProcessMessages(TRUE);
-            SDL_WIIUHandleLifecycleStatus(status, true);
-        } while (status == PROCUI_STATUS_IN_BACKGROUND &&
-                 SDL_wiiu_lifecycle.phase != SDL_WIIU_LIFECYCLE_EXITING);
-        SDL_LogInfo(SDL_LOG_CATEGORY_SYSTEM,
-                    "WiiU lifecycle: background wait finished on %s",
-                    SDL_WIIU_GetProcUIStatusName(status));
-    }
+    SDL_WIIU_PumpLifecycleInternal(true);
 }
 
 bool SDL_WIIU_IsInForeground(void)

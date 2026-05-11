@@ -64,6 +64,9 @@
 #ifdef SDL_PLATFORM_OPENHARMONY
 #include "core/openharmony/SDL_openharmony.h"
 #endif
+#ifdef SDL_PLATFORM_WIIU
+#include "core/wiiu/SDL_wiiulifecycle.h"
+#endif
 
 #define SDL_ALL_SUBSYSTEM_FLAGS ~0U
 
@@ -722,6 +725,10 @@ Uint32 SDL_WasInit(SDL_InitFlags flags)
 void SDL_Quit(void)
 {
     SDL_bInMainQuit = true;
+
+#ifdef SDL_PLATFORM_WIIU
+    SDL_WIIU_EnsureSystemExit();
+#endif
 
     // Quit all subsystems
 #ifdef SDL_PLATFORM_WINDOWS

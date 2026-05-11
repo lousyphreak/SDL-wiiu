@@ -36,6 +36,7 @@ int SDL_RunApp(int argc, char *argv[], SDL_main_func mainFunction, void *reserve
     }
 
     result = SDL_CallMainFunction(argc, argv, mainFunction);
+    SDL_WIIU_EnsureSystemExit();
     SDL_WIIU_QuitLifecycle();
     return result;
 }

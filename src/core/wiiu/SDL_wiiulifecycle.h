@@ -24,6 +24,7 @@
 #define SDL_wiiulifecycle_h_
 
 bool SDL_WIIU_InitLifecycle(void);
+void SDL_WIIU_EnsureSystemExit(void);
 void SDL_WIIU_QuitLifecycle(void);
 void SDL_WIIU_PumpLifecycle(void);
 bool SDL_WIIU_IsInForeground(void);
