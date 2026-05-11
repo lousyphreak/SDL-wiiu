@@ -4614,6 +4614,41 @@ extern "C" {
 #define SDL_HINT_WAVE_TRUNCATION "SDL_WAVE_TRUNCATION"
 
 /**
+ * A variable controlling how many region buffers SDL allocates per Wii U file.
+ *
+ * Each open Wii U file stream gets its own region cache. Regions are fixed-size
+ * windows over the file, and SDL uses these buffers with async prefetch to keep
+ * the next region hot while the current one is being consumed.
+ *
+ * The variable can be set to a decimal integer value between 2 and 16.
+ *
+ * The default is "4".
+ *
+ * This hint should be set before the first Wii U file is opened.
+ *
+ * \since This hint is available since SDL 3.4.0.
+ */
+#define SDL_HINT_WIIU_FILE_REGION_CACHE_BUFFERS "SDL_WIIU_FILE_REGION_CACHE_BUFFERS"
+
+/**
+ * A variable controlling the size, in bytes, of each Wii U file region cache
+ * buffer.
+ *
+ * Each open Wii U file stream gets its own region cache. Region size controls
+ * both the cache granularity and the amount of data SDL asks the Wii U async
+ * filesystem API to prefetch for the next sequential region.
+ *
+ * The variable can be set to a decimal integer value between 4096 and 262144.
+ *
+ * The default is "32768".
+ *
+ * This hint should be set before the first Wii U file is opened.
+ *
+ * \since This hint is available since SDL 3.4.0.
+ */
+#define SDL_HINT_WIIU_FILE_REGION_CACHE_SIZE "SDL_WIIU_FILE_REGION_CACHE_SIZE"
+
+/**
  * A variable controlling whether the window is activated when the
  * SDL_RaiseWindow function is called.
  *
