@@ -3707,8 +3707,10 @@ elseif(WIIU)
   )
   set(HAVE_SDL_STORAGE TRUE)
 
-  set(SDL_FSOPS_POSIX 1)
-  sdl_sources("${SDL3_SOURCE_DIR}/src/filesystem/posix/SDL_sysfsops.c")
+  sdl_glob_sources(
+    "${SDL3_SOURCE_DIR}/src/io/wiiu/*.c"
+    "${SDL3_SOURCE_DIR}/src/io/wiiu/*.h"
+  )
   set(HAVE_SDL_FSOPS TRUE)
 
   sdl_glob_sources("${SDL3_SOURCE_DIR}/src/locale/wiiu/*.c")

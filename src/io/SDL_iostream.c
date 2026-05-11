@@ -63,6 +63,9 @@ struct SDL_IOStream
 #ifdef SDL_PLATFORM_3DS
 #include "n3ds/SDL_iostreamromfs.h"
 #endif // SDL_PLATFORM_3DS
+#ifdef SDL_PLATFORM_WIIU
+#include "wiiu/SDL_iostreamwiiu.h"
+#endif // SDL_PLATFORM_WIIU
 
 #ifdef SDL_PLATFORM_ANDROID
 #include <unistd.h>
@@ -1172,6 +1175,9 @@ SDL_IOStream *SDL_IOFromFile(const char *file, const char *mode)
     if (handle != INVALID_HANDLE_VALUE) {
         iostr = SDL_IOFromHandle(handle, mode, true);
     }
+
+#elif defined(SDL_PLATFORM_WIIU)
+    iostr = SDL_WIIU_IOFromFile(file, mode);
 
 #elif defined(HAVE_STDIO_H)
     {

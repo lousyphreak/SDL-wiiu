@@ -35,6 +35,11 @@ char *SDL_SYS_GetPrefPath(const char *org, const char *app)
     return SDL_WIIU_GetPrefPath(org, app);
 }
 
+char *SDL_SYS_GetCurrentDirectory(void)
+{
+    return SDL_WIIU_GetCurrentDirectory();
+}
+
 char *SDL_SYS_GetUserFolder(SDL_Folder folder)
 {
     (void) folder;

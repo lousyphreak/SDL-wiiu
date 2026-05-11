@@ -29,8 +29,23 @@
 extern "C" {
 #endif
 
+typedef struct SDL_WIIUFile SDL_WIIUFile;
+
 extern char *SDL_WIIU_GetBasePath(void);
+extern char *SDL_WIIU_GetCurrentDirectory(void);
 extern char *SDL_WIIU_GetPrefPath(const char *org, const char *app);
+extern bool SDL_WIIU_EnumerateDirectory(const char *path, SDL_EnumerateDirectoryCallback cb, void *userdata);
+extern bool SDL_WIIU_GetPathInfo(const char *path, SDL_PathInfo *info);
+extern bool SDL_WIIU_CreateDirectory(const char *path);
+extern bool SDL_WIIU_RemovePath(const char *path);
+extern bool SDL_WIIU_RenamePath(const char *oldpath, const char *newpath);
+extern SDL_WIIUFile *SDL_WIIU_OpenFile(const char *path, const char *mode);
+extern Sint64 SDL_WIIU_FileSize(SDL_WIIUFile *file);
+extern Sint64 SDL_WIIU_FileSeek(SDL_WIIUFile *file, Sint64 offset, SDL_IOWhence whence);
+extern size_t SDL_WIIU_FileRead(SDL_WIIUFile *file, void *ptr, size_t size, SDL_IOStatus *status);
+extern size_t SDL_WIIU_FileWrite(SDL_WIIUFile *file, const void *ptr, size_t size, SDL_IOStatus *status);
+extern bool SDL_WIIU_FileFlush(SDL_WIIUFile *file, SDL_IOStatus *status);
+extern bool SDL_WIIU_FileClose(SDL_WIIUFile *file);
 extern bool SDL_WIIU_FlushUserSave(void);
 extern Uint64 SDL_WIIU_GetUserSaveSpaceRemaining(void);
 

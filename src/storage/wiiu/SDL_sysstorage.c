@@ -37,6 +37,14 @@ typedef struct SDL_WiiUEnumerateData
     void *callback_userdata;
 } SDL_WiiUEnumerateData;
 
+static SDL_EnumerationResult SDLCALL WIIU_StopEnumerateCallback(void *userdata, const char *dirname, const char *fname)
+{
+    (void) userdata;
+    (void) dirname;
+    (void) fname;
+    return SDL_ENUM_SUCCESS;
+}
+
 static char *WIIU_CreateFullPath(const char *base, const char *relative)
 {
     char *result = NULL;
@@ -95,7 +103,14 @@ static bool WIIU_GetStoragePathInfo(void *userdata, const char *path, SDL_PathIn
     bool result = false;
 
     if (fullpath) {
-        result = SDL_GetPathInfo(fullpath, info);
+        SDL_Log("[storage] wiiu-info begin: %s", fullpath);
+        result = SDL_WIIU_GetPathInfo(fullpath, info);
+        if (!result) {
+            SDL_Log("[storage] wiiu-info miss: %s (%s)", fullpath, SDL_GetError());
+        } else if (info) {
+            SDL_Log("[storage] wiiu-info ok: %s type=%d size=%llu", fullpath,
+                    (int) info->type, (unsigned long long) info->size);
+        }
         SDL_free(fullpath);
     }
     return result;
@@ -219,12 +234,6 @@ static bool WIIU_CopyStorageFile(void *userdata, const char *oldpath, const char
     return result;
 }
 
-static Uint64 WIIU_GetStorageSpaceRemaining(void *userdata)
-{
-    (void) userdata;
-    return SDL_WIIU_GetUserSaveSpaceRemaining();
-}
-
 static const SDL_StorageInterface WIIU_user_iface = {
     sizeof(SDL_StorageInterface),
     WIIU_CloseStorage,
@@ -237,7 +246,7 @@ static const SDL_StorageInterface WIIU_user_iface = {
     WIIU_RemoveStoragePath,
     WIIU_RenameStoragePath,
     WIIU_CopyStorageFile,
-    WIIU_GetStorageSpaceRemaining
+    NULL
 };
 
 static SDL_Storage *WIIU_User_Create(const char *org, const char *app, SDL_PropertiesID props)
@@ -247,6 +256,7 @@ static SDL_Storage *WIIU_User_Create(const char *org, const char *app, SDL_Prope
 
     (void) props;
 
+    SDL_Log("[storage] wiiu-user create begin");
     data = (SDL_WiiUStorageData *) SDL_calloc(1, sizeof(*data));
     if (!data) {
         return NULL;
@@ -254,14 +264,19 @@ static SDL_Storage *WIIU_User_Create(const char *org, const char *app, SDL_Prope
 
     data->root_path = SDL_WIIU_GetPrefPath(org ? org : "", app ? app : "");
     if (!data->root_path) {
+        SDL_Log("[storage] wiiu-user pref failed: %s", SDL_GetError());
         SDL_free(data);
         return NULL;
     }
+    SDL_Log("[storage] wiiu-user pref ready: %s", data->root_path);
 
     storage = SDL_OpenStorage(&WIIU_user_iface, data);
     if (!storage) {
+        SDL_Log("[storage] wiiu-user open-storage failed: %s", SDL_GetError());
         SDL_free(data->root_path);
         SDL_free(data);
+    } else {
+        SDL_Log("[storage] wiiu-user create done");
     }
     return storage;
 }
