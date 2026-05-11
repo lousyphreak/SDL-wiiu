@@ -95,6 +95,7 @@ struct SDL_VideoData
     bool keyboard_initialized;
     bool mouse_initialized;
     bool drc_connected;
+    bool drc_uses_tv_render_buffer;
     Uint32 foreground_generation;
     SDL_WiiUScanTarget tv;
     SDL_WiiUScanTarget drc;

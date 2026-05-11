@@ -1704,6 +1704,7 @@ static bool WIIU_RenderPresent(SDL_Renderer *renderer)
     SDL_WiiUScanTarget *drc_target = &data->video->drc;
     const bool render_tv = SDL_WIIU_GetOutputWindow(data->device, SDL_WIIU_DISPLAY_TV) == renderer->window;
     const bool render_drc = data->video->drc_connected && (SDL_WIIU_GetOutputWindow(data->device, SDL_WIIU_DISPLAY_DRC) == renderer->window);
+    const bool mirror_drc_from_tv = data->video->drc_uses_tv_render_buffer && render_tv && render_drc;
     const Uint32 foreground_generation = data->video->foreground_generation;
     const bool first_present_after_acquire = (foreground_generation != 0) && (data->logged_foreground_generation_present != foreground_generation);
     SDL_Rect dstrect;
@@ -1755,7 +1756,9 @@ static bool WIIU_RenderPresent(SDL_Renderer *renderer)
         }
     }
 
-    if (render_drc && drc_target->scan_buffer) {
+    if (mirror_drc_from_tv && tv_target->scan_buffer && drc_target->scan_buffer) {
+        GX2CopyColorBufferToScanBuffer(&tv_target->color_buffer, GX2_SCAN_TARGET_DRC);
+    } else if (render_drc && drc_target->scan_buffer) {
         SDL_WIIU_GetPresentationRect(data->backbuffer_w, data->backbuffer_h, (int)drc_target->render_width, (int)drc_target->render_height, &dstrect);
         if (!WIIU_RenderToScanTarget(data, drc_target, GX2_SCAN_TARGET_DRC, &dstrect)) {
             return false;

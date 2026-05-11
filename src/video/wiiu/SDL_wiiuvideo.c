@@ -77,7 +77,7 @@ static bool SDL_WIIU_InitForegroundHeap(SDL_VideoData *driverdata);
 static void SDL_WIIU_DestroyForegroundHeap(SDL_VideoData *driverdata);
 static bool SDL_WIIU_InitMEM1Heap(SDL_VideoData *driverdata);
 static void SDL_WIIU_DestroyMEM1Heap(SDL_VideoData *driverdata);
-static bool SDL_WIIU_AllocateScanTarget(SDL_VideoData *driverdata, SDL_WiiUScanTarget *target);
+static bool SDL_WIIU_AllocateScanTarget(SDL_VideoData *driverdata, SDL_WiiUScanTarget *target, bool with_render_buffer);
 static void SDL_WIIU_ClearScanTarget(SDL_WiiUScanTarget *target);
 static bool SDL_WIIU_GetScanTargetConfiguration(SDL_WiiUScanTarget *target, SDL_Window *window, uint32_t *render_width, uint32_t *render_height, uint32_t *scan_width, uint32_t *scan_height, GX2TVRenderMode *tv_render_mode, GX2DrcRenderMode *drc_render_mode);
 static bool SDL_WIIU_AddDisplay(SDL_VideoData *driverdata, SDL_WiiUDisplayKind kind, const char *name, int x, int y, int w, int h, SDL_DisplayID *out_display);
@@ -390,6 +390,7 @@ bool SDL_WIIU_UpdateOutputWindows(SDL_VideoDevice *_this)
     uint32_t drc_scan_height;
     GX2TVRenderMode tv_render_mode;
     GX2DrcRenderMode drc_render_mode;
+    bool drc_uses_tv_render_buffer;
     bool need_rebuild;
 
     for (SDL_Window *window = _this->windows; window; window = window->next) {
@@ -405,6 +406,7 @@ bool SDL_WIIU_UpdateOutputWindows(SDL_VideoDevice *_this)
 
     tv_window = SDL_WIIU_GetOutputWindow(_this, SDL_WIIU_DISPLAY_TV);
     drc_window = SDL_WIIU_GetOutputWindow(_this, SDL_WIIU_DISPLAY_DRC);
+    drc_uses_tv_render_buffer = (active_window_count == 1) && tv_window && (tv_window == drc_window);
     tv_display = SDL_GetVideoDisplay(driverdata->tv_display);
     drc_display = SDL_GetVideoDisplay(driverdata->drc_display);
 
@@ -426,6 +428,7 @@ bool SDL_WIIU_UpdateOutputWindows(SDL_VideoDevice *_this)
         driverdata->tv.scan_width != tv_scan_width ||
         driverdata->tv.scan_height != tv_scan_height ||
         driverdata->tv.tv_render_mode != tv_render_mode ||
+        driverdata->drc_uses_tv_render_buffer != drc_uses_tv_render_buffer ||
         driverdata->drc.render_width != drc_render_width ||
         driverdata->drc.render_height != drc_render_height ||
         driverdata->drc.scan_width != drc_scan_width ||
@@ -437,6 +440,7 @@ bool SDL_WIIU_UpdateOutputWindows(SDL_VideoDevice *_this)
     driverdata->tv.scan_width = tv_scan_width;
     driverdata->tv.scan_height = tv_scan_height;
     driverdata->tv.tv_render_mode = tv_render_mode;
+    driverdata->drc_uses_tv_render_buffer = drc_uses_tv_render_buffer;
 
     driverdata->drc.render_width = drc_render_width;
     driverdata->drc.render_height = drc_render_height;
@@ -697,7 +701,7 @@ static void SDL_WIIU_ClearScanTarget(SDL_WiiUScanTarget *target)
     target->scan_buffer = NULL;
 }
 
-static bool SDL_WIIU_AllocateScanTarget(SDL_VideoData *driverdata, SDL_WiiUScanTarget *target)
+static bool SDL_WIIU_AllocateScanTarget(SDL_VideoData *driverdata, SDL_WiiUScanTarget *target, bool with_render_buffer)
 {
     uint32_t unused_size;
     GX2Surface *color_surface = &target->color_buffer.surface;
@@ -718,6 +722,18 @@ static bool SDL_WIIU_AllocateScanTarget(SDL_VideoData *driverdata, SDL_WiiUScanT
     GX2Invalidate(GX2_INVALIDATE_MODE_CPU, target->scan_buffer, target->total_size);
 
     SDL_zero(target->color_buffer);
+    target->context_state = NULL;
+    if (!with_render_buffer) {
+        if (target->kind == SDL_WIIU_DISPLAY_TV) {
+            GX2SetTVBuffer(target->scan_buffer, target->total_size, target->tv_render_mode, target->surface_format, GX2_BUFFERING_MODE_DOUBLE);
+            GX2SetTVScale(target->scan_width, target->scan_height);
+        } else {
+            GX2SetDRCBuffer(target->scan_buffer, target->total_size, target->drc_render_mode, target->surface_format, GX2_BUFFERING_MODE_DOUBLE);
+            GX2SetDRCScale(target->scan_width, target->scan_height);
+        }
+        return true;
+    }
+
     color_surface->use = GX2_SURFACE_USE_TEXTURE_COLOR_BUFFER_TV;
     color_surface->dim = GX2_SURFACE_DIM_TEXTURE_2D;
     color_surface->width = target->render_width;
@@ -810,8 +826,8 @@ static void SDL_WIIU_ForegroundAcquired(void *userdata)
         return;
     }
 
-    if (!SDL_WIIU_AllocateScanTarget(driverdata, &driverdata->tv) ||
-        !SDL_WIIU_AllocateScanTarget(driverdata, &driverdata->drc)) {
+    if (!SDL_WIIU_AllocateScanTarget(driverdata, &driverdata->tv, true) ||
+        !SDL_WIIU_AllocateScanTarget(driverdata, &driverdata->drc, !driverdata->drc_uses_tv_render_buffer)) {
         SDL_LogError(SDL_LOG_CATEGORY_VIDEO, "WiiU video: failed to allocate scan targets: %s", SDL_GetError());
         SDL_WIIU_DestroyForegroundResources(driverdata);
         return;
