@@ -143,6 +143,7 @@ extern void SDL_WIIU_GetWindowPresentationSize(SDL_VideoDevice *_this, SDL_Windo
 extern Uint32 SDL_WIIU_GetPresentOutputMask(SDL_VideoDevice *_this);
 extern bool SDL_WIIU_ShouldSwapPresent(SDL_VideoDevice *_this, Uint32 rendered_outputs);
 extern void SDL_WIIU_ResetPresentState(SDL_VideoDevice *_this);
+extern void SDL_WIIU_ReleaseForegroundRendererResources(SDL_Renderer *renderer, MEMHeapHandle mem1_heap, MEMHeapHandle foreground_heap);
 
 extern void SDL_WIIU_InitTouch(void);
 extern void SDL_WIIU_QuitTouch(void);

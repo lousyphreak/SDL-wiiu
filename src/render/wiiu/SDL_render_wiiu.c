@@ -12,6 +12,7 @@
 #include "../../core/wiiu/SDL_wiiulifecycle.h"
 
 #include <coreinit/memdefaultheap.h>
+#include <coreinit/memheap.h>
 #include <gx2/clear.h>
 #include <gx2/display.h>
 #include <gx2/draw.h>
@@ -30,6 +31,7 @@
 #include "SDL_wiiurender_shader_gsh.h"
 
 #define WIIU_RENDER_PRESENT_VERTEX_COUNT 6
+#define WIIU_VERTEX_UPLOAD_BUFFER_MIN_SIZE (4 * 1024 * 1024)
 #define WIIU_TEXTURE_TYPE_NONE 0.0f
 #define WIIU_TEXTURE_TYPE_RGBA 1.0f
 #define WIIU_TEXTURE_TYPE_INDEX8 2.0f
@@ -37,7 +39,7 @@
 #define WIIU_TEXTURE_TYPE_NV12 4.0f
 #define WIIU_TEXTURE_TYPE_P010 5.0f
 #define WIIU_UNIFORM_BLOCK_ALIGNMENT 0x100u
-#define WIIU_UNIFORM_UPLOAD_BUFFER_SIZE (1024 * 1024)
+#define WIIU_UNIFORM_UPLOAD_BUFFER_SIZE (4 * 1024 * 1024)
 
 typedef struct WIIU_Vertex
 {
@@ -102,7 +104,7 @@ typedef struct WIIU_RenderData
     SDL_WiiUShaderGroup shader;
     GX2RBuffer vertex_buffer;
     size_t vertex_buffer_size;
-    GX2RBuffer present_buffer;
+    size_t vertex_buffer_offset;
     void *uniform_upload_buffer;
     uint32_t uniform_upload_buffer_size;
     uint32_t uniform_upload_offset;
@@ -114,11 +116,18 @@ typedef struct WIIU_RenderData
     uint32_t vertex_uniform_block_size;
     uint32_t pixel_uniform_block_size;
     GX2Sampler sampler;
+    uint32_t sampler_generation;
     SDL_ScaleMode sampler_scale_mode;
     SDL_TextureAddressMode sampler_address_u;
     SDL_TextureAddressMode sampler_address_v;
     bool sampler_indexed;
     GX2Sampler palette_sampler;
+    const GX2Sampler *bound_pixel_sampler0;
+    const GX2Sampler *bound_pixel_sampler1;
+    const GX2Sampler *bound_pixel_sampler2;
+    uint32_t bound_pixel_sampler0_generation;
+    uint32_t bound_pixel_sampler1_generation;
+    uint32_t bound_pixel_sampler2_generation;
     WIIU_TextureData backbuffer;
     int backbuffer_w;
     int backbuffer_h;
@@ -130,6 +139,15 @@ typedef struct WIIU_RenderData
     bool clip_dirty;
     SDL_BlendMode blend_mode;
     bool blend_dirty;
+    bool vertex_uniforms_valid;
+    float cached_vertex_transform[4];
+    bool pixel_uniforms_valid;
+    float cached_pixel_texture_type[4];
+    float cached_pixel_texel_size[4];
+    float cached_pixel_yuv_matrix[16];
+    const GX2Texture *bound_pixel_texture0;
+    const GX2Texture *bound_pixel_texture1;
+    const GX2Texture *bound_pixel_texture2;
     int vsync;
     Uint32 logged_foreground_generation_present;
 } WIIU_RenderData;
@@ -191,6 +209,17 @@ static uint32_t WIIU_AlignUniformBlockSize(uint32_t size)
     return size & ~(WIIU_UNIFORM_BLOCK_ALIGNMENT - 1u);
 }
 
+static size_t WIIU_AlignUploadSize(size_t size, size_t alignment)
+{
+    const size_t mask = alignment - 1;
+
+    if (size == 0) {
+        return 0;
+    }
+
+    return (size + mask) & ~mask;
+}
+
 static bool WIIU_CreateUniformUploadBuffer(WIIU_RenderData *data, uint32_t size)
 {
     data->uniform_upload_buffer = MEMAllocFromDefaultHeapEx(size, WIIU_UNIFORM_BLOCK_ALIGNMENT);
@@ -239,27 +268,74 @@ static void WIIU_StoreUniformFloats(float *dst, const float *src, uint32_t count
 
 static bool WIIU_EnsureVertexBuffer(WIIU_RenderData *data, size_t size)
 {
+    size_t buffer_size;
+
+    size = WIIU_AlignUploadSize(size, sizeof(WIIU_Vertex));
     if (size <= data->vertex_buffer_size) {
         return true;
     }
 
+    buffer_size = SDL_max(size * 2, (size_t)WIIU_VERTEX_UPLOAD_BUFFER_MIN_SIZE);
+
     if (data->vertex_buffer.buffer) {
+        GX2DrawDone();
         GX2RDestroyBufferEx(&data->vertex_buffer, 0);
         SDL_zero(data->vertex_buffer);
         data->vertex_buffer_size = 0;
+        data->vertex_buffer_offset = 0;
     }
 
     data->vertex_buffer.flags = GX2R_RESOURCE_BIND_VERTEX_BUFFER |
                                 GX2R_RESOURCE_USAGE_CPU_WRITE |
                                 GX2R_RESOURCE_USAGE_GPU_READ |
                                 GX2R_RESOURCE_USAGE_FORCE_MEM2;
-    data->vertex_buffer.elemSize = (uint32_t)size;
+    data->vertex_buffer.elemSize = (uint32_t)buffer_size;
     data->vertex_buffer.elemCount = 1;
     if (!GX2RCreateBuffer(&data->vertex_buffer)) {
         return SDL_SetError("Unable to allocate Wii U render vertex buffer");
     }
 
-    data->vertex_buffer_size = size;
+    data->vertex_buffer_size = buffer_size;
+    data->vertex_buffer_offset = 0;
+    return true;
+}
+
+static bool WIIU_ReserveVertexUpload(WIIU_RenderData *data, size_t size, size_t *offset, void **ptr)
+{
+    void *base;
+
+    size = WIIU_AlignUploadSize(size, sizeof(WIIU_Vertex));
+    if (!size) {
+        if (offset) {
+            *offset = 0;
+        }
+        if (ptr) {
+            *ptr = NULL;
+        }
+        return true;
+    }
+
+    if (!WIIU_EnsureVertexBuffer(data, size)) {
+        return false;
+    }
+
+    if ((data->vertex_buffer_offset + size) > data->vertex_buffer_size) {
+        data->vertex_buffer_offset = 0;
+    }
+
+    base = GX2RLockBufferEx(&data->vertex_buffer, 0);
+    if (!base) {
+        return SDL_SetError("Unable to lock Wii U render vertex buffer");
+    }
+
+    if (offset) {
+        *offset = data->vertex_buffer_offset;
+    }
+    if (ptr) {
+        *ptr = (Uint8 *)base + data->vertex_buffer_offset;
+    }
+
+    data->vertex_buffer_offset += size;
     return true;
 }
 
@@ -376,7 +452,7 @@ static GX2TexClampMode WIIU_GetClampMode(SDL_TextureAddressMode mode)
     }
 }
 
-static bool WIIU_CreateGX2Texture(GX2Texture *texture, int w, int h, GX2SurfaceFormat format, uint32_t comp_map, bool render_target)
+static bool WIIU_CreateGX2TextureWithPlacement(GX2Texture *texture, int w, int h, GX2SurfaceFormat format, uint32_t comp_map, bool render_target, GX2RResourceFlags memory_flags)
 {
     SDL_zero(*texture);
     texture->surface.use = render_target ? (GX2_SURFACE_USE_TEXTURE | GX2_SURFACE_USE_COLOR_BUFFER) : GX2_SURFACE_USE_TEXTURE;
@@ -398,7 +474,7 @@ static bool WIIU_CreateGX2Texture(GX2Texture *texture, int w, int h, GX2SurfaceF
                                GX2R_RESOURCE_USAGE_CPU_WRITE |
                                GX2R_RESOURCE_USAGE_GPU_READ |
                                (render_target ? GX2R_RESOURCE_USAGE_GPU_WRITE : GX2R_RESOURCE_BIND_NONE) |
-                               GX2R_RESOURCE_USAGE_FORCE_MEM2)) {
+                                memory_flags)) {
         return SDL_SetError("Unable to allocate Wii U texture");
     }
 
@@ -406,6 +482,11 @@ static bool WIIU_CreateGX2Texture(GX2Texture *texture, int w, int h, GX2SurfaceF
     GX2Invalidate(GX2_INVALIDATE_MODE_CPU_TEXTURE, texture->surface.image, texture->surface.imageSize);
     GX2InitTextureRegs(texture);
     return true;
+}
+
+static bool WIIU_CreateGX2Texture(GX2Texture *texture, int w, int h, GX2SurfaceFormat format, uint32_t comp_map, bool render_target)
+{
+    return WIIU_CreateGX2TextureWithPlacement(texture, w, h, format, comp_map, render_target, GX2R_RESOURCE_USAGE_FORCE_MEM2);
 }
 
 static void WIIU_DestroyGX2Texture(GX2Texture *texture)
@@ -432,6 +513,10 @@ static void WIIU_DestroyTextureData(WIIU_TextureData *texturedata)
         return;
     }
 
+    if (texturedata->texture.surface.image || texturedata->texture_u.surface.image || texturedata->texture_v.surface.image) {
+        GX2DrawDone();
+    }
+
     if (texturedata->shadow_yuv) {
         SDL_SW_DestroyYUVTexture(texturedata->shadow_yuv);
     }
@@ -445,13 +530,40 @@ static void WIIU_DestroyTextureData(WIIU_TextureData *texturedata)
     SDL_zero(*texturedata);
 }
 
+void SDL_WIIU_ReleaseForegroundRendererResources(SDL_Renderer *renderer, MEMHeapHandle mem1_heap, MEMHeapHandle foreground_heap)
+{
+    WIIU_RenderData *data;
+    MEMHeapHandle heap;
+
+    if (!renderer || !renderer->name || SDL_strcmp(renderer->name, "wiiu") != 0) {
+        return;
+    }
+
+    data = (WIIU_RenderData *)renderer->internal;
+    if (!data || !data->backbuffer.texture.surface.image) {
+        return;
+    }
+
+    heap = MEMFindContainHeap(data->backbuffer.texture.surface.image);
+    if (heap != mem1_heap && heap != foreground_heap) {
+        return;
+    }
+
+    WIIU_DestroyTextureData(&data->backbuffer);
+    data->backbuffer_w = 0;
+    data->backbuffer_h = 0;
+    WIIU_InvalidateCachedState(renderer);
+}
+
 static bool WIIU_UpdatePlane(GX2Texture *texture, int x, int y, int w, int h, const void *pixels, int pitch, Uint32 bytes_per_pixel)
 {
-    Uint8 *dst = (Uint8 *)GX2RLockSurfaceEx(&texture->surface, 0, 0);
+    Uint8 *dst;
     const Uint8 *src = (const Uint8 *)pixels;
     const int dst_pitch = (int)texture->surface.pitch * (int)bytes_per_pixel;
     int row;
 
+    GX2DrawDone();
+    dst = (Uint8 *)GX2RLockSurfaceEx(&texture->surface, 0, 0);
     if (!dst) {
         return SDL_SetError("Unable to lock Wii U texture surface");
     }
@@ -512,8 +624,9 @@ static bool WIIU_EnsureBackbuffer(SDL_Renderer *renderer)
     }
 
     WIIU_DestroyTextureData(&data->backbuffer);
-    if (!WIIU_CreateGX2Texture(&data->backbuffer.texture, w, h, GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8,
-                               GX2_COMP_MAP(GX2_SQ_SEL_R, GX2_SQ_SEL_G, GX2_SQ_SEL_B, GX2_SQ_SEL_A), true) ||
+    if (!WIIU_CreateGX2TextureWithPlacement(&data->backbuffer.texture, w, h, GX2_SURFACE_FORMAT_UNORM_R8_G8_B8_A8,
+                                            GX2_COMP_MAP(GX2_SQ_SEL_R, GX2_SQ_SEL_G, GX2_SQ_SEL_B, GX2_SQ_SEL_A), true,
+                                            GX2R_RESOURCE_USAGE_FORCE_MEM1) ||
         !WIIU_InitColorBufferFromTexture(&data->backbuffer)) {
         WIIU_DestroyTextureData(&data->backbuffer);
         return false;
@@ -527,13 +640,45 @@ static bool WIIU_EnsureBackbuffer(SDL_Renderer *renderer)
     return true;
 }
 
+static GX2ColorBuffer *WIIU_GetOutputColorBuffer(SDL_Renderer *renderer)
+{
+    WIIU_RenderData *data = (WIIU_RenderData *)renderer->internal;
+    const bool render_tv = SDL_WIIU_GetOutputWindow(data->device, SDL_WIIU_DISPLAY_TV) == renderer->window;
+    const bool render_drc = data->video->drc_connected && (SDL_WIIU_GetOutputWindow(data->device, SDL_WIIU_DISPLAY_DRC) == renderer->window);
+
+    if (!data->video->foreground_ready) {
+        return NULL;
+    }
+
+    if (render_tv && data->video->tv.color_buffer.surface.image) {
+        return &data->video->tv.color_buffer;
+    }
+
+    if (render_drc) {
+        if (data->video->drc_uses_tv_render_buffer) {
+            return data->video->tv.color_buffer.surface.image ? &data->video->tv.color_buffer : NULL;
+        }
+        if (data->video->drc.color_buffer.surface.image) {
+            return &data->video->drc.color_buffer;
+        }
+    }
+
+    return NULL;
+}
+
 static GX2ColorBuffer *WIIU_GetCurrentColorBuffer(SDL_Renderer *renderer)
 {
     WIIU_RenderData *data = (WIIU_RenderData *)renderer->internal;
+    GX2ColorBuffer *color_buffer;
 
     if (renderer->target) {
         WIIU_TextureData *texturedata = (WIIU_TextureData *)renderer->target->internal;
         return texturedata->color_buffer_ready ? &texturedata->color_buffer : NULL;
+    }
+
+    color_buffer = WIIU_GetOutputColorBuffer(renderer);
+    if (color_buffer) {
+        return color_buffer;
     }
 
     return data->backbuffer.color_buffer_ready ? &data->backbuffer.color_buffer : NULL;
@@ -619,6 +764,10 @@ static bool WIIU_EnsureSampler(WIIU_RenderData *data, SDL_ScaleMode scale_mode, 
 
     GX2InitSamplerXYFilter(&data->sampler, filter_mode, filter_mode, GX2_TEX_ANISO_RATIO_NONE);
     GX2InitSamplerClamping(&data->sampler, WIIU_GetClampMode(address_u), WIIU_GetClampMode(address_v), GX2_TEX_CLAMP_MODE_CLAMP);
+    data->sampler_generation++;
+    if (data->sampler_generation == 0) {
+        data->sampler_generation = 1;
+    }
     data->sampler_scale_mode = scale_mode;
     data->sampler_address_u = address_u;
     data->sampler_address_v = address_v;
@@ -658,8 +807,14 @@ static void WIIU_EmitQuadVertices(WIIU_Vertex *verts, const SDL_FPoint positions
 
 static bool WIIU_SetVertexUniforms(WIIU_RenderData *data, const float *transform)
 {
-    WIIU_VertexUniformBlock *block = (WIIU_VertexUniformBlock *)WIIU_AllocUniformUpload(data, data->vertex_uniform_block_size);
+    WIIU_VertexUniformBlock *block;
 
+    if (data->vertex_uniforms_valid &&
+        SDL_memcmp(data->cached_vertex_transform, transform, sizeof(data->cached_vertex_transform)) == 0) {
+        return true;
+    }
+
+    block = (WIIU_VertexUniformBlock *)WIIU_AllocUniformUpload(data, data->vertex_uniform_block_size);
     if (!block) {
         return false;
     }
@@ -667,13 +822,23 @@ static bool WIIU_SetVertexUniforms(WIIU_RenderData *data, const float *transform
     WIIU_StoreUniformFloats(block->transform, transform, SDL_arraysize(block->transform));
     GX2Invalidate(GX2_INVALIDATE_MODE_UNIFORM_BLOCK | GX2_INVALIDATE_MODE_CPU, block, data->vertex_uniform_block_size);
     GX2SetVertexUniformBlock(data->vertex_uniform_block->offset, data->vertex_uniform_block_size, block);
+    SDL_memcpy(data->cached_vertex_transform, transform, sizeof(data->cached_vertex_transform));
+    data->vertex_uniforms_valid = true;
     return true;
 }
 
 static bool WIIU_SetPixelUniforms(WIIU_RenderData *data, const float *texture_type, const float *texel_size, const float *matrix)
 {
-    WIIU_PixelUniformBlock *block = (WIIU_PixelUniformBlock *)WIIU_AllocUniformUpload(data, data->pixel_uniform_block_size);
+    WIIU_PixelUniformBlock *block;
 
+    if (data->pixel_uniforms_valid &&
+        SDL_memcmp(data->cached_pixel_texture_type, texture_type, sizeof(data->cached_pixel_texture_type)) == 0 &&
+        SDL_memcmp(data->cached_pixel_texel_size, texel_size, sizeof(data->cached_pixel_texel_size)) == 0 &&
+        SDL_memcmp(data->cached_pixel_yuv_matrix, matrix, sizeof(data->cached_pixel_yuv_matrix)) == 0) {
+        return true;
+    }
+
+    block = (WIIU_PixelUniformBlock *)WIIU_AllocUniformUpload(data, data->pixel_uniform_block_size);
     if (!block) {
         return false;
     }
@@ -687,7 +852,33 @@ static bool WIIU_SetPixelUniforms(WIIU_RenderData *data, const float *texture_ty
 
     GX2Invalidate(GX2_INVALIDATE_MODE_UNIFORM_BLOCK | GX2_INVALIDATE_MODE_CPU, block, data->pixel_uniform_block_size);
     GX2SetPixelUniformBlock(data->pixel_uniform_block->offset, data->pixel_uniform_block_size, block);
+    SDL_memcpy(data->cached_pixel_texture_type, texture_type, sizeof(data->cached_pixel_texture_type));
+    SDL_memcpy(data->cached_pixel_texel_size, texel_size, sizeof(data->cached_pixel_texel_size));
+    SDL_memcpy(data->cached_pixel_yuv_matrix, matrix, sizeof(data->cached_pixel_yuv_matrix));
+    data->pixel_uniforms_valid = true;
     return true;
+}
+
+static inline void WIIU_BindPixelTexture(const GX2Texture *texture, uint32_t location, const GX2Texture **cached)
+{
+    if (*cached == texture) {
+        return;
+    }
+
+    GX2SetPixelTexture(texture, location);
+    *cached = texture;
+}
+
+static inline void WIIU_BindPixelSampler(const GX2Sampler *sampler, uint32_t generation, uint32_t location,
+                                         const GX2Sampler **cached_sampler, uint32_t *cached_generation)
+{
+    if (*cached_sampler == sampler && *cached_generation == generation) {
+        return;
+    }
+
+    GX2SetPixelSampler(sampler, location);
+    *cached_sampler = sampler;
+    *cached_generation = generation;
 }
 
 static bool WIIU_ApplyDrawState(SDL_Renderer *renderer, SDL_RenderCommand *cmd)
@@ -791,7 +982,6 @@ static bool WIIU_ApplyDrawState(SDL_Renderer *renderer, SDL_RenderCommand *cmd)
         }
     }
 
-    GX2SetShaderMode(GX2_SHADER_MODE_UNIFORM_BLOCK);
     GX2SetFetchShader(&data->shader.fetch_shader);
     GX2SetVertexShader(data->shader.vertex_shader);
     GX2SetPixelShader(data->shader.pixel_shader);
@@ -801,90 +991,38 @@ static bool WIIU_ApplyDrawState(SDL_Renderer *renderer, SDL_RenderCommand *cmd)
     }
 
     if (texturedata) {
-        GX2SetPixelTexture(&texturedata->texture, data->sampler0_location);
-        GX2SetPixelSampler(&data->sampler, data->sampler0_location);
+        WIIU_BindPixelTexture(&texturedata->texture, data->sampler0_location, &data->bound_pixel_texture0);
+        WIIU_BindPixelSampler(&data->sampler, data->sampler_generation, data->sampler0_location,
+                              &data->bound_pixel_sampler0, &data->bound_pixel_sampler0_generation);
 
         if (texturedata->kind == WIIU_TEXTURE_KIND_INDEX8) {
             WIIU_PaletteData *palette = cmd->data.draw.texture->palette ? (WIIU_PaletteData *)cmd->data.draw.texture->palette->internal : NULL;
             if (!palette || !palette->ready) {
                 return SDL_SetError("Indexed texture palette is unavailable");
             }
-            GX2SetPixelTexture(&palette->texture, data->sampler1_location);
-            GX2SetPixelSampler(&data->palette_sampler, data->sampler1_location);
+            WIIU_BindPixelTexture(&palette->texture, data->sampler1_location, &data->bound_pixel_texture1);
+            WIIU_BindPixelSampler(&data->palette_sampler, 0, data->sampler1_location,
+                                  &data->bound_pixel_sampler1, &data->bound_pixel_sampler1_generation);
         } else if (texturedata->kind == WIIU_TEXTURE_KIND_YUV3) {
-            GX2SetPixelTexture(&texturedata->texture_u, data->sampler1_location);
-            GX2SetPixelTexture(&texturedata->texture_v, data->sampler2_location);
-            GX2SetPixelSampler(&data->sampler, data->sampler1_location);
-            GX2SetPixelSampler(&data->sampler, data->sampler2_location);
+            WIIU_BindPixelTexture(&texturedata->texture_u, data->sampler1_location, &data->bound_pixel_texture1);
+            WIIU_BindPixelTexture(&texturedata->texture_v, data->sampler2_location, &data->bound_pixel_texture2);
+            WIIU_BindPixelSampler(&data->sampler, data->sampler_generation, data->sampler1_location,
+                                  &data->bound_pixel_sampler1, &data->bound_pixel_sampler1_generation);
+            WIIU_BindPixelSampler(&data->sampler, data->sampler_generation, data->sampler2_location,
+                                  &data->bound_pixel_sampler2, &data->bound_pixel_sampler2_generation);
         } else if (texturedata->kind == WIIU_TEXTURE_KIND_NV12 || texturedata->kind == WIIU_TEXTURE_KIND_P010) {
-            GX2SetPixelTexture(&texturedata->texture_u, data->sampler1_location);
-            GX2SetPixelSampler(&data->sampler, data->sampler1_location);
+            WIIU_BindPixelTexture(&texturedata->texture_u, data->sampler1_location, &data->bound_pixel_texture1);
+            WIIU_BindPixelSampler(&data->sampler, data->sampler_generation, data->sampler1_location,
+                                  &data->bound_pixel_sampler1, &data->bound_pixel_sampler1_generation);
         }
     }
 
     return true;
 }
 
-static bool WIIU_RenderToScanTarget(WIIU_RenderData *data, SDL_WiiUScanTarget *target, GX2ScanTarget scan_target, const SDL_Rect *dstrect)
+static bool WIIU_RenderToScanTarget(const GX2ColorBuffer *color_buffer, GX2ScanTarget scan_target)
 {
-    WIIU_Vertex *vertices;
-    const float color[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
-    const float transform[4] = {
-        2.0f / (float)SDL_max(dstrect->w, 1),
-        -2.0f / (float)SDL_max(dstrect->h, 1),
-        -1.0f,
-        1.0f
-    };
-    const float texture_type[4] = { WIIU_TEXTURE_TYPE_RGBA, 0.0f, 0.0f, 0.0f };
-    const float texel_size[4] = {
-        1.0f / (float)SDL_max(data->backbuffer_w, 1),
-        1.0f / (float)SDL_max(data->backbuffer_h, 1),
-        0.0f,
-        0.0f
-    };
-    const float yuv_matrix[16] = {
-        0.0f, 0.0f, 0.0f, 0.0f,
-        1.0f, 0.0f, 0.0f, 0.0f,
-        0.0f, 1.0f, 0.0f, 0.0f,
-        0.0f, 0.0f, 1.0f, 0.0f
-    };
-
-    vertices = (WIIU_Vertex *)GX2RLockBufferEx(&data->present_buffer, 0);
-    if (!vertices) {
-        return SDL_SetError("Unable to lock Wii U present vertex buffer");
-    }
-
-    vertices[0].position.x = 0.0f;            vertices[0].position.y = 0.0f;            vertices[0].color.r = color[0]; vertices[0].color.g = color[1]; vertices[0].color.b = color[2]; vertices[0].color.a = color[3]; vertices[0].tex_coord.x = 0.0f; vertices[0].tex_coord.y = 0.0f;
-    vertices[1].position.x = (float)dstrect->w; vertices[1].position.y = 0.0f;            vertices[1].color.r = color[0]; vertices[1].color.g = color[1]; vertices[1].color.b = color[2]; vertices[1].color.a = color[3]; vertices[1].tex_coord.x = 1.0f; vertices[1].tex_coord.y = 0.0f;
-    vertices[2].position.x = (float)dstrect->w; vertices[2].position.y = (float)dstrect->h; vertices[2].color.r = color[0]; vertices[2].color.g = color[1]; vertices[2].color.b = color[2]; vertices[2].color.a = color[3]; vertices[2].tex_coord.x = 1.0f; vertices[2].tex_coord.y = 1.0f;
-    vertices[3].position.x = 0.0f;            vertices[3].position.y = 0.0f;            vertices[3].color.r = color[0]; vertices[3].color.g = color[1]; vertices[3].color.b = color[2]; vertices[3].color.a = color[3]; vertices[3].tex_coord.x = 0.0f; vertices[3].tex_coord.y = 0.0f;
-    vertices[4].position.x = (float)dstrect->w; vertices[4].position.y = (float)dstrect->h; vertices[4].color.r = color[0]; vertices[4].color.g = color[1]; vertices[4].color.b = color[2]; vertices[4].color.a = color[3]; vertices[4].tex_coord.x = 1.0f; vertices[4].tex_coord.y = 1.0f;
-    vertices[5].position.x = 0.0f;            vertices[5].position.y = (float)dstrect->h; vertices[5].color.r = color[0]; vertices[5].color.g = color[1]; vertices[5].color.b = color[2]; vertices[5].color.a = color[3]; vertices[5].tex_coord.x = 0.0f; vertices[5].tex_coord.y = 1.0f;
-    GX2RUnlockBufferEx(&data->present_buffer, 0);
-
-    GX2SetContextState(target->context_state);
-    GX2ClearColor(&target->color_buffer, 0.0f, 0.0f, 0.0f, 1.0f);
-    GX2SetContextState(target->context_state);
-    GX2SetColorBuffer(&target->color_buffer, GX2_RENDER_TARGET_0);
-    GX2SetViewport((float)dstrect->x, (float)dstrect->y, (float)dstrect->w, (float)dstrect->h, 0.0f, 1.0f);
-    GX2SetScissor(0, 0, target->render_width, target->render_height);
-    WIIU_SetBaseRenderState();
-    GX2SetFetchShader(&data->shader.fetch_shader);
-    GX2SetVertexShader(data->shader.vertex_shader);
-    GX2SetPixelShader(data->shader.pixel_shader);
-    GX2Invalidate((GX2InvalidateMode)(GX2_INVALIDATE_MODE_TEXTURE | GX2_INVALIDATE_MODE_COLOR_BUFFER),
-                  data->backbuffer.color_buffer.surface.image,
-                  data->backbuffer.color_buffer.surface.imageSize);
-    GX2SetPixelTexture(&data->backbuffer.texture, data->sampler0_location);
-    GX2SetPixelSampler(&data->sampler, data->sampler0_location);
-    GX2RSetAttributeBuffer(&data->present_buffer, 0, sizeof(WIIU_Vertex), 0);
-
-    if (!WIIU_SetVertexUniforms(data, transform) || !WIIU_SetPixelUniforms(data, texture_type, texel_size, yuv_matrix)) {
-        return false;
-    }
-
-    GX2DrawEx(GX2_PRIMITIVE_MODE_TRIANGLES, WIIU_RENDER_PRESENT_VERTEX_COUNT, 0, 1);
-    GX2CopyColorBufferToScanBuffer(&target->color_buffer, scan_target);
+    GX2CopyColorBufferToScanBuffer(color_buffer, scan_target);
     return true;
 }
 
@@ -919,6 +1057,7 @@ static bool WIIU_UpdatePalette(SDL_Renderer *renderer, SDL_TexturePalette *palet
         return SDL_SetError("Wii U palette texture is unavailable");
     }
 
+    GX2DrawDone();
     pixels = (Uint8 *)GX2RLockSurfaceEx(&palettedata->texture.surface, 0, 0);
     if (!pixels) {
         return SDL_SetError("Unable to lock Wii U palette texture");
@@ -946,6 +1085,7 @@ static void WIIU_DestroyPalette(SDL_Renderer *renderer, SDL_TexturePalette *pale
         return;
     }
 
+    GX2DrawDone();
     WIIU_DestroyGX2Texture(&palettedata->texture);
     SDL_free(palettedata);
     palette->internal = NULL;
@@ -1540,43 +1680,63 @@ static void WIIU_InvalidateCachedState(SDL_Renderer *renderer)
     data->sampler_address_u = SDL_TEXTURE_ADDRESS_INVALID;
     data->sampler_address_v = SDL_TEXTURE_ADDRESS_INVALID;
     data->sampler_indexed = false;
+    data->vertex_uniforms_valid = false;
+    data->pixel_uniforms_valid = false;
+    data->bound_pixel_texture0 = NULL;
+    data->bound_pixel_texture1 = NULL;
+    data->bound_pixel_texture2 = NULL;
+    data->bound_pixel_sampler0 = NULL;
+    data->bound_pixel_sampler1 = NULL;
+    data->bound_pixel_sampler2 = NULL;
+    data->bound_pixel_sampler0_generation = 0;
+    data->bound_pixel_sampler1_generation = 0;
+    data->bound_pixel_sampler2_generation = 0;
 }
 
 static bool WIIU_RunCommandQueue(SDL_Renderer *renderer, SDL_RenderCommand *cmd, void *vertices, size_t vertsize)
 {
     WIIU_RenderData *data = (WIIU_RenderData *)renderer->internal;
     GX2ColorBuffer *color_buffer;
+    size_t vertex_offset = 0;
 
-    if (!WIIU_EnsureBackbuffer(renderer)) {
+    if (!renderer->target && !WIIU_GetOutputColorBuffer(renderer) && !WIIU_EnsureBackbuffer(renderer)) {
         return false;
     }
 
-    if (renderer->target) {
-        WIIU_TextureData *target = (WIIU_TextureData *)renderer->target->internal;
-        color_buffer = &target->color_buffer;
-    } else {
-        color_buffer = &data->backbuffer.color_buffer;
-    }
-
-    if (!WIIU_EnsureVertexBuffer(data, vertsize)) {
-        return false;
+    color_buffer = WIIU_GetCurrentColorBuffer(renderer);
+    if (!color_buffer) {
+        return SDL_SetError("Unable to resolve Wii U render color buffer");
     }
 
     if (vertsize > 0) {
-        void *mapped = GX2RLockBufferEx(&data->vertex_buffer, 0);
-        if (!mapped) {
-            return SDL_SetError("Unable to lock Wii U vertex buffer");
+        void *mapped = NULL;
+
+        if (!WIIU_ReserveVertexUpload(data, vertsize, &vertex_offset, &mapped)) {
+            return false;
         }
         SDL_memcpy(mapped, vertices, vertsize);
         GX2RUnlockBufferEx(&data->vertex_buffer, 0);
     }
+
+    data->vertex_uniforms_valid = false;
+    data->pixel_uniforms_valid = false;
+    data->bound_pixel_texture0 = NULL;
+    data->bound_pixel_texture1 = NULL;
+    data->bound_pixel_texture2 = NULL;
+    data->bound_pixel_sampler0 = NULL;
+    data->bound_pixel_sampler1 = NULL;
+    data->bound_pixel_sampler2 = NULL;
+    data->bound_pixel_sampler0_generation = 0;
+    data->bound_pixel_sampler1_generation = 0;
+    data->bound_pixel_sampler2_generation = 0;
 
     GX2SetContextState(data->context_state);
     GX2SetColorBuffer(color_buffer, GX2_RENDER_TARGET_0);
     GX2SetViewport(0.0f, 0.0f, (float)color_buffer->surface.width, (float)color_buffer->surface.height, 0.0f, 1.0f);
     GX2SetScissor(0, 0, color_buffer->surface.width, color_buffer->surface.height);
     WIIU_SetBaseRenderState();
-    GX2SetPixelSampler(&data->sampler, data->sampler0_location);
+    WIIU_BindPixelSampler(&data->sampler, data->sampler_generation, data->sampler0_location,
+                          &data->bound_pixel_sampler0, &data->bound_pixel_sampler0_generation);
 
     while (cmd) {
         switch (cmd->command) {
@@ -1605,8 +1765,20 @@ static bool WIIU_RunCommandQueue(SDL_Renderer *renderer, SDL_RenderCommand *cmd,
             data->viewport_dirty = true;
             data->clip_dirty = true;
             data->blend_dirty = true;
+            data->vertex_uniforms_valid = false;
+            data->pixel_uniforms_valid = false;
+            data->bound_pixel_texture0 = NULL;
+            data->bound_pixel_texture1 = NULL;
+            data->bound_pixel_texture2 = NULL;
+            data->bound_pixel_sampler0 = NULL;
+            data->bound_pixel_sampler1 = NULL;
+            data->bound_pixel_sampler2 = NULL;
+            data->bound_pixel_sampler0_generation = 0;
+            data->bound_pixel_sampler1_generation = 0;
+            data->bound_pixel_sampler2_generation = 0;
             WIIU_SetBaseRenderState();
-            GX2SetPixelSampler(&data->sampler, data->sampler0_location);
+            WIIU_BindPixelSampler(&data->sampler, data->sampler_generation, data->sampler0_location,
+                                  &data->bound_pixel_sampler0, &data->bound_pixel_sampler0_generation);
             break;
 
         case SDL_RENDERCMD_DRAW_POINTS:
@@ -1618,7 +1790,7 @@ static bool WIIU_RunCommandQueue(SDL_Renderer *renderer, SDL_RenderCommand *cmd,
             if (!WIIU_ApplyDrawState(renderer, cmd)) {
                 return false;
             }
-            GX2RSetAttributeBuffer(&data->vertex_buffer, 0, sizeof(WIIU_Vertex), (uint32_t)cmd->data.draw.first);
+            GX2RSetAttributeBuffer(&data->vertex_buffer, 0, sizeof(WIIU_Vertex), (uint32_t)(vertex_offset + cmd->data.draw.first));
             GX2DrawEx(cmd->command == SDL_RENDERCMD_DRAW_POINTS ? GX2_PRIMITIVE_MODE_POINTS
                                                                 : (cmd->command == SDL_RENDERCMD_DRAW_LINES ? GX2_PRIMITIVE_MODE_LINES : GX2_PRIMITIVE_MODE_TRIANGLES),
                       (uint32_t)cmd->data.draw.count, 0, 1);
@@ -1631,33 +1803,32 @@ static bool WIIU_RunCommandQueue(SDL_Renderer *renderer, SDL_RenderCommand *cmd,
         cmd = cmd->next;
     }
 
-    GX2Invalidate((GX2InvalidateMode)(GX2_INVALIDATE_MODE_TEXTURE | GX2_INVALIDATE_MODE_COLOR_BUFFER),
-                  color_buffer->surface.image,
-                  color_buffer->surface.imageSize);
-    GX2Flush();
-    GX2DrawDone();
     return true;
 }
 
 static SDL_Surface *WIIU_RenderReadPixels(SDL_Renderer *renderer, const SDL_Rect *rect)
 {
-    WIIU_RenderData *data = (WIIU_RenderData *)renderer->internal;
     GX2Surface src_surface;
     GX2Texture staging;
     GX2Rect src_rect;
     GX2Point dst_point;
+    GX2ColorBuffer *color_buffer;
     SDL_Surface *surface;
     Uint8 *src;
     Uint8 *dst;
     int row;
     const int pitch = rect->w * 4;
 
-    if (renderer->target) {
-        WIIU_TextureData *texturedata = (WIIU_TextureData *)renderer->target->internal;
-        src_surface = texturedata->texture.surface;
-    } else {
-        src_surface = data->backbuffer.texture.surface;
+    if (!renderer->target && !WIIU_GetOutputColorBuffer(renderer) && !WIIU_EnsureBackbuffer(renderer)) {
+        return NULL;
     }
+
+    color_buffer = WIIU_GetCurrentColorBuffer(renderer);
+    if (!color_buffer) {
+        SDL_SetError("Wii U render source is unavailable");
+        return NULL;
+    }
+    src_surface = color_buffer->surface;
 
     surface = SDL_CreateSurface(rect->w, rect->h, SDL_PIXELFORMAT_RGBA8888);
     if (!surface) {
@@ -1707,7 +1878,6 @@ static bool WIIU_RenderPresent(SDL_Renderer *renderer)
     const bool mirror_drc_from_tv = data->video->drc_uses_tv_render_buffer && render_tv && render_drc;
     const Uint32 foreground_generation = data->video->foreground_generation;
     const bool first_present_after_acquire = (foreground_generation != 0) && (data->logged_foreground_generation_present != foreground_generation);
-    SDL_Rect dstrect;
     Uint32 rendered_outputs = 0;
 
     if (!SDL_WIIU_IsInForeground()) {
@@ -1744,26 +1914,24 @@ static bool WIIU_RenderPresent(SDL_Renderer *renderer)
         return true;
     }
 
-    if (!WIIU_EnsureBackbuffer(renderer)) {
-        return false;
+    if (data->vsync) {
+        SDL_WIIU_BeginRender();
     }
 
-    SDL_WIIU_BeginRender();
-
     if (render_tv && tv_target->scan_buffer) {
-        SDL_WIIU_GetPresentationRect(data->backbuffer_w, data->backbuffer_h, (int)tv_target->render_width, (int)tv_target->render_height, &dstrect);
-        if (!WIIU_RenderToScanTarget(data, tv_target, GX2_SCAN_TARGET_TV, &dstrect)) {
+        if (!WIIU_RenderToScanTarget(&tv_target->color_buffer, GX2_SCAN_TARGET_TV)) {
             return false;
         }
         rendered_outputs |= SDL_WIIU_PRESENT_OUTPUT_TV;
     }
 
     if (mirror_drc_from_tv && tv_target->scan_buffer && drc_target->scan_buffer) {
-        GX2CopyColorBufferToScanBuffer(&tv_target->color_buffer, GX2_SCAN_TARGET_DRC);
+        if (!WIIU_RenderToScanTarget(&tv_target->color_buffer, GX2_SCAN_TARGET_DRC)) {
+            return false;
+        }
         rendered_outputs |= SDL_WIIU_PRESENT_OUTPUT_DRC;
     } else if (render_drc && drc_target->scan_buffer) {
-        SDL_WIIU_GetPresentationRect(data->backbuffer_w, data->backbuffer_h, (int)drc_target->render_width, (int)drc_target->render_height, &dstrect);
-        if (!WIIU_RenderToScanTarget(data, drc_target, GX2_SCAN_TARGET_DRC, &dstrect)) {
+        if (!WIIU_RenderToScanTarget(&drc_target->color_buffer, GX2_SCAN_TARGET_DRC)) {
             return false;
         }
         rendered_outputs |= SDL_WIIU_PRESENT_OUTPUT_DRC;
@@ -1780,8 +1948,6 @@ static bool WIIU_RenderPresent(SDL_Renderer *renderer)
     }
 
     GX2SwapScanBuffers();
-    GX2Flush();
-    GX2DrawDone();
     GX2SetTVEnable(TRUE);
     GX2SetDRCEnable(data->video->drc_connected ? TRUE : FALSE);
     if (first_present_after_acquire) {
@@ -1929,17 +2095,6 @@ static bool WIIU_CreateRenderer(SDL_Renderer *renderer, SDL_Window *window, SDL_
         return false;
     }
 
-    data->present_buffer.flags = GX2R_RESOURCE_BIND_VERTEX_BUFFER |
-                                 GX2R_RESOURCE_USAGE_CPU_WRITE |
-                                 GX2R_RESOURCE_USAGE_GPU_READ |
-                                 GX2R_RESOURCE_USAGE_FORCE_MEM2;
-    data->present_buffer.elemSize = sizeof(WIIU_Vertex);
-    data->present_buffer.elemCount = WIIU_RENDER_PRESENT_VERTEX_COUNT;
-    if (!GX2RCreateBuffer(&data->present_buffer)) {
-        WIIU_DestroyRenderer((SDL_Renderer *)renderer);
-        return SDL_SetError("Unable to allocate Wii U present vertex buffer");
-    }
-
     GX2InitSampler(&data->sampler, GX2_TEX_CLAMP_MODE_CLAMP, GX2_TEX_XY_FILTER_MODE_POINT);
     GX2InitSampler(&data->palette_sampler, GX2_TEX_CLAMP_MODE_CLAMP, GX2_TEX_XY_FILTER_MODE_POINT);
 
@@ -2017,10 +2172,8 @@ static void WIIU_DestroyRenderer(SDL_Renderer *renderer)
         return;
     }
 
+    GX2DrawDone();
     WIIU_DestroyTextureData(&data->backbuffer);
-    if (data->present_buffer.buffer) {
-        GX2RDestroyBufferEx(&data->present_buffer, 0);
-    }
     if (data->vertex_buffer.buffer) {
         GX2RDestroyBufferEx(&data->vertex_buffer, 0);
     }

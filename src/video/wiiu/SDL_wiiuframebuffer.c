@@ -355,7 +355,9 @@ bool SDL_WIIU_UpdateWindowFramebuffer(SDL_VideoDevice *_this, SDL_Window *window
         return false;
     }
 
-    SDL_WIIU_BeginRender();
+    if (windowdata->framebuffer_vsync) {
+        SDL_WIIU_BeginRender();
+    }
     if (render_tv && tv_target->scan_buffer) {
         SDL_WIIU_RenderWindowToTarget(driverdata, window, surface, tv_target, GX2_SCAN_TARGET_TV);
         rendered_outputs |= SDL_WIIU_PRESENT_OUTPUT_TV;
@@ -373,7 +375,6 @@ bool SDL_WIIU_UpdateWindowFramebuffer(SDL_VideoDevice *_this, SDL_Window *window
     }
 
     GX2SwapScanBuffers();
-    GX2Flush();
     GX2DrawDone();
     GX2SetTVEnable(TRUE);
     GX2SetDRCEnable(driverdata->drc_connected ? TRUE : FALSE);

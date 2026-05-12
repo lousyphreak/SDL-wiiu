@@ -86,7 +86,11 @@ static bool SDL_WIIU_InitForegroundHeap(SDL_VideoData *driverdata);
 static void SDL_WIIU_DestroyForegroundHeap(SDL_VideoData *driverdata);
 static bool SDL_WIIU_InitMEM1Heap(SDL_VideoData *driverdata);
 static void SDL_WIIU_DestroyMEM1Heap(SDL_VideoData *driverdata);
-static bool SDL_WIIU_AllocateScanTarget(SDL_VideoData *driverdata, SDL_WiiUScanTarget *target, bool with_render_buffer);
+static void *SDL_WIIU_AllocForegroundMemory(SDL_VideoData *driverdata, uint32_t size, uint32_t alignment, bool prefer_mem1, bool fallback_to_foreground);
+static void SDL_WIIU_BindScanTarget(SDL_WiiUScanTarget *target);
+static bool SDL_WIIU_AllocateScanBuffer(SDL_VideoData *driverdata, SDL_WiiUScanTarget *target);
+static bool SDL_WIIU_AllocateScanTargetRenderBuffer(SDL_VideoData *driverdata, SDL_WiiUScanTarget *target);
+static void SDL_WIIU_ReleaseForegroundRenderers(SDL_VideoDevice *_this, SDL_VideoData *driverdata);
 static void SDL_WIIU_ClearScanTarget(SDL_WiiUScanTarget *target);
 static bool SDL_WIIU_GetScanTargetConfiguration(SDL_WiiUScanTarget *target, SDL_Window *window, uint32_t *render_width, uint32_t *render_height, uint32_t *scan_width, uint32_t *scan_height, GX2TVRenderMode *tv_render_mode, GX2DrcRenderMode *drc_render_mode);
 static bool SDL_WIIU_AddDisplay(SDL_VideoData *driverdata, SDL_WiiUDisplayKind kind, const char *name, int x, int y, int w, int h, SDL_DisplayID *out_display);
@@ -108,17 +112,41 @@ static void SDL_WIIU_UpdateDisplayLayout(SDL_VideoData *driverdata, int tv_heigh
 
 static void *SDL_WIIU_GX2RAlloc(GX2RResourceFlags flags, uint32_t size, uint32_t alignment)
 {
-    (void)flags;
+    SDL_VideoDevice *_this = SDL_GetVideoDevice();
+    SDL_VideoData *driverdata = _this ? (SDL_VideoData *)_this->internal : NULL;
+    void *block = NULL;
 
     if (alignment < 4) {
         alignment = 4;
     }
+
+    if ((flags & GX2R_RESOURCE_USAGE_FORCE_MEM1) && driverdata && driverdata->mem1_heap) {
+        block = MEMAllocFromExpHeapEx(driverdata->mem1_heap, size, (int)alignment);
+        if (block) {
+            return block;
+        }
+    }
+
     return MEMAllocFromDefaultHeapEx(size, alignment);
 }
 
 static void SDL_WIIU_GX2RFree(GX2RResourceFlags flags, void *block)
 {
+    SDL_VideoDevice *_this = SDL_GetVideoDevice();
+    SDL_VideoData *driverdata = _this ? (SDL_VideoData *)_this->internal : NULL;
+    MEMHeapHandle heap;
+
     (void)flags;
+
+    if (!block) {
+        return;
+    }
+
+    heap = MEMFindContainHeap(block);
+    if (driverdata && heap && (heap == driverdata->mem1_heap || heap == driverdata->foreground_heap)) {
+        MEMFreeToExpHeap(heap, block);
+        return;
+    }
 
     MEMFreeToDefaultHeap(block);
 }
@@ -902,10 +930,42 @@ static void SDL_WIIU_ClearScanTarget(SDL_WiiUScanTarget *target)
     target->scan_buffer = NULL;
 }
 
-static bool SDL_WIIU_AllocateScanTarget(SDL_VideoData *driverdata, SDL_WiiUScanTarget *target, bool with_render_buffer)
+static void *SDL_WIIU_AllocForegroundMemory(SDL_VideoData *driverdata, uint32_t size, uint32_t alignment, bool prefer_mem1, bool fallback_to_foreground)
+{
+    void *block = NULL;
+
+    if (alignment < 4) {
+        alignment = 4;
+    }
+
+    if (prefer_mem1 && driverdata->mem1_heap) {
+        block = MEMAllocFromExpHeapEx(driverdata->mem1_heap, size, (int)alignment);
+        if (block) {
+            return block;
+        }
+    }
+
+    if (fallback_to_foreground && driverdata->foreground_heap) {
+        block = MEMAllocFromExpHeapEx(driverdata->foreground_heap, size, (int)alignment);
+    }
+
+    return block;
+}
+
+static void SDL_WIIU_BindScanTarget(SDL_WiiUScanTarget *target)
+{
+    if (target->kind == SDL_WIIU_DISPLAY_TV) {
+        GX2SetTVBuffer(target->scan_buffer, target->total_size, target->tv_render_mode, target->surface_format, GX2_BUFFERING_MODE_DOUBLE);
+        GX2SetTVScale(target->scan_width, target->scan_height);
+    } else {
+        GX2SetDRCBuffer(target->scan_buffer, target->total_size, target->drc_render_mode, target->surface_format, GX2_BUFFERING_MODE_DOUBLE);
+        GX2SetDRCScale(target->scan_width, target->scan_height);
+    }
+}
+
+static bool SDL_WIIU_AllocateScanBuffer(SDL_VideoData *driverdata, SDL_WiiUScanTarget *target)
 {
     uint32_t unused_size;
-    GX2Surface *color_surface = &target->color_buffer.surface;
 
     if (target->kind == SDL_WIIU_DISPLAY_TV) {
         GX2CalcTVSize(target->tv_render_mode, target->surface_format, GX2_BUFFERING_MODE_DOUBLE, &target->total_size, &unused_size);
@@ -913,7 +973,7 @@ static bool SDL_WIIU_AllocateScanTarget(SDL_VideoData *driverdata, SDL_WiiUScanT
         GX2CalcDRCSize(target->drc_render_mode, target->surface_format, GX2_BUFFERING_MODE_DOUBLE, &target->total_size, &unused_size);
     }
 
-    target->scan_buffer = MEMAllocFromExpHeapEx(driverdata->foreground_heap, target->total_size, GX2_SCAN_BUFFER_ALIGNMENT);
+    target->scan_buffer = SDL_WIIU_AllocForegroundMemory(driverdata, target->total_size, GX2_SCAN_BUFFER_ALIGNMENT, true, true);
     if (!target->scan_buffer) {
         SDL_SetError("Unable to allocate Wii U scan buffer");
         return false;
@@ -924,16 +984,13 @@ static bool SDL_WIIU_AllocateScanTarget(SDL_VideoData *driverdata, SDL_WiiUScanT
 
     SDL_zero(target->color_buffer);
     target->context_state = NULL;
-    if (!with_render_buffer) {
-        if (target->kind == SDL_WIIU_DISPLAY_TV) {
-            GX2SetTVBuffer(target->scan_buffer, target->total_size, target->tv_render_mode, target->surface_format, GX2_BUFFERING_MODE_DOUBLE);
-            GX2SetTVScale(target->scan_width, target->scan_height);
-        } else {
-            GX2SetDRCBuffer(target->scan_buffer, target->total_size, target->drc_render_mode, target->surface_format, GX2_BUFFERING_MODE_DOUBLE);
-            GX2SetDRCScale(target->scan_width, target->scan_height);
-        }
-        return true;
-    }
+    SDL_WIIU_BindScanTarget(target);
+    return true;
+}
+
+static bool SDL_WIIU_AllocateScanTargetRenderBuffer(SDL_VideoData *driverdata, SDL_WiiUScanTarget *target)
+{
+    GX2Surface *color_surface = &target->color_buffer.surface;
 
     color_surface->use = GX2_SURFACE_USE_TEXTURE_COLOR_BUFFER_TV;
     color_surface->dim = GX2_SURFACE_DIM_TEXTURE_2D;
@@ -948,7 +1005,7 @@ static bool SDL_WIIU_AllocateScanTarget(SDL_VideoData *driverdata, SDL_WiiUScanT
     GX2CalcSurfaceSizeAndAlignment(color_surface);
     GX2InitColorBufferRegs(&target->color_buffer);
 
-    color_surface->image = MEMAllocFromExpHeapEx(driverdata->mem1_heap, color_surface->imageSize, color_surface->alignment);
+    color_surface->image = SDL_WIIU_AllocForegroundMemory(driverdata, color_surface->imageSize, color_surface->alignment, true, true);
     if (!color_surface->image) {
         SDL_SetError("Unable to allocate Wii U color buffer");
         return false;
@@ -967,18 +1024,24 @@ static bool SDL_WIIU_AllocateScanTarget(SDL_VideoData *driverdata, SDL_WiiUScanT
     GX2SetViewport(0.0f, 0.0f, (float)target->render_width, (float)target->render_height, 0.0f, 1.0f);
     GX2SetScissor(0, 0, target->render_width, target->render_height);
 
-    if (target->kind == SDL_WIIU_DISPLAY_TV) {
-        GX2SetTVBuffer(target->scan_buffer, target->total_size, target->tv_render_mode, target->surface_format, GX2_BUFFERING_MODE_DOUBLE);
-        GX2SetTVScale(target->scan_width, target->scan_height);
-    } else {
-        GX2SetDRCBuffer(target->scan_buffer, target->total_size, target->drc_render_mode, target->surface_format, GX2_BUFFERING_MODE_DOUBLE);
-        GX2SetDRCScale(target->scan_width, target->scan_height);
-    }
-
+    SDL_WIIU_BindScanTarget(target);
     return true;
 }
 
-static void SDL_WIIU_DestroyForegroundResources(SDL_VideoData *driverdata)
+static void SDL_WIIU_ReleaseForegroundRenderers(SDL_VideoDevice *_this, SDL_VideoData *driverdata)
+{
+    SDL_Window *window;
+
+    for (window = _this->windows; window; window = window->next) {
+        int i;
+
+        for (i = 0; i < window->num_renderers; ++i) {
+            SDL_WIIU_ReleaseForegroundRendererResources(window->renderers[i], driverdata->mem1_heap, driverdata->foreground_heap);
+        }
+    }
+}
+
+static void SDL_WIIU_DestroyForegroundResources(SDL_VideoDevice *_this, SDL_VideoData *driverdata)
 {
     if (!driverdata->foreground_ready && !driverdata->foreground_heap && !driverdata->mem1_heap) {
         return;
@@ -990,6 +1053,7 @@ static void SDL_WIIU_DestroyForegroundResources(SDL_VideoData *driverdata)
                 driverdata->tv.scan_buffer,
                 driverdata->drc.scan_buffer);
     driverdata->pending_present_mask = 0;
+    SDL_WIIU_ReleaseForegroundRenderers(_this, driverdata);
     SDL_WIIU_ClearScanTarget(&driverdata->tv);
     SDL_WIIU_ClearScanTarget(&driverdata->drc);
     SDL_WIIU_DestroyMEM1Heap(driverdata);
@@ -1009,7 +1073,7 @@ static void SDL_WIIU_ForegroundAcquired(void *userdata)
                 driverdata->foreground_heap,
                 driverdata->mem1_heap);
     if (driverdata->foreground_ready || driverdata->foreground_heap || driverdata->mem1_heap) {
-        SDL_WIIU_DestroyForegroundResources(driverdata);
+        SDL_WIIU_DestroyForegroundResources(_this, driverdata);
     }
 
     if (driverdata->gx2_initialized) {
@@ -1028,10 +1092,12 @@ static void SDL_WIIU_ForegroundAcquired(void *userdata)
         return;
     }
 
-    if (!SDL_WIIU_AllocateScanTarget(driverdata, &driverdata->tv, true) ||
-        !SDL_WIIU_AllocateScanTarget(driverdata, &driverdata->drc, !driverdata->drc_uses_tv_render_buffer)) {
+    if (!SDL_WIIU_AllocateScanBuffer(driverdata, &driverdata->tv) ||
+        !SDL_WIIU_AllocateScanBuffer(driverdata, &driverdata->drc) ||
+        !SDL_WIIU_AllocateScanTargetRenderBuffer(driverdata, &driverdata->tv) ||
+        (!driverdata->drc_uses_tv_render_buffer && !SDL_WIIU_AllocateScanTargetRenderBuffer(driverdata, &driverdata->drc))) {
         SDL_LogError(SDL_LOG_CATEGORY_VIDEO, "WiiU video: failed to allocate scan targets: %s", SDL_GetError());
-        SDL_WIIU_DestroyForegroundResources(driverdata);
+        SDL_WIIU_DestroyForegroundResources(_this, driverdata);
         return;
     }
 
@@ -1082,7 +1148,7 @@ static void SDL_WIIU_ForegroundReleased(void *userdata)
     GX2SetTVEnable(TRUE);
     GX2SetDRCEnable(TRUE);
     GX2DrawDone();
-    SDL_WIIU_DestroyForegroundResources(driverdata);
+    SDL_WIIU_DestroyForegroundResources(_this, driverdata);
     SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO, "WiiU video: foreground release complete");
 }
 
@@ -1201,7 +1267,7 @@ static void SDL_WIIU_VideoQuit(SDL_VideoDevice *_this)
     GX2SetTVEnable(FALSE);
     GX2SetDRCEnable(FALSE);
     GX2SetDRCConnectCallback(0, NULL);
-    SDL_WIIU_DestroyForegroundResources(driverdata);
+    SDL_WIIU_DestroyForegroundResources(_this, driverdata);
 
     if (driverdata->gx2_initialized) {
         GX2RSetAllocator(NULL, NULL);

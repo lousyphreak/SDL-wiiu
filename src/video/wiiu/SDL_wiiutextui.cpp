@@ -437,7 +437,9 @@ static void SDL_WIIU_PresentModalFrames(SDL_VideoData *driverdata,
                                         void (*draw_tv)(void),
                                         void (*draw_drc)(void))
 {
-    SDL_WIIU_BeginRender();
+    if (GX2GetSwapInterval() > 0) {
+        SDL_WIIU_BeginRender();
+    }
 
     if (driverdata->tv.scan_buffer) {
         SDL_WIIU_PrepareScanTarget(&driverdata->tv);
@@ -452,7 +454,6 @@ static void SDL_WIIU_PresentModalFrames(SDL_VideoData *driverdata,
     }
 
     GX2SwapScanBuffers();
-    GX2Flush();
     GX2DrawDone();
     GX2SetTVEnable(TRUE);
     GX2SetDRCEnable(driverdata->drc_connected ? TRUE : FALSE);
