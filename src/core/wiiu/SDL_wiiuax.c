@@ -36,6 +36,17 @@ typedef struct SDL_WiiUAXState
 
 static SDL_WiiUAXState SDL_wiiu_ax;
 
+static void SDL_WIIU_AX_WaitForAudioOutReady(void)
+{
+    for (int attempt = 0; attempt < 200; ++attempt) {
+        if (AXIsAudioOutReady()) {
+            return;
+        }
+
+        SDL_Delay(10);
+    }
+}
+
 static bool SDL_WIIU_AX_EnsureLock(void)
 {
     if (!SDL_wiiu_ax.lock) {
@@ -63,6 +74,7 @@ bool SDL_WIIU_AX_Acquire(Uint32 *sample_rate, Uint32 *frame_samples)
     SDL_LockMutex(SDL_wiiu_ax.lock);
 
     if (SDL_wiiu_ax.refcount == 0) {
+        SDL_WIIU_AX_WaitForAudioOutReady();
         if (!AXIsInit()) {
             AXInitParams params = {
                 AX_INIT_RENDERER_48KHZ,

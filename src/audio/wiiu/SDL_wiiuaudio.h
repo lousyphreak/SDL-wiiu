@@ -26,6 +26,7 @@
 
 #include <coreinit/memres.h>
 #include <mic/mic.h>
+#include <sndcore2/device.h>
 #include <sndcore2/voice.h>
 
 #define WIIU_AUDIO_MIX_BUFFERS 4

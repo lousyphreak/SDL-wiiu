@@ -69,8 +69,9 @@ static Uint32 WIIUAUDIO_FallbackChannelCount(AXDeviceType type, AXDeviceMode mod
         return 1;
     case AX_DEVICE_MODE_6_CHANNEL:
         return (type == AX_DEVICE_TYPE_TV) ? 6u : 2u;
-    case AX_DEVICE_MODE_STEREO:
     case AX_DEVICE_MODE_SURROUND:
+        return (type == AX_DEVICE_TYPE_DRC) ? 4u : 2u;
+    case AX_DEVICE_MODE_STEREO:
     case AX_DEVICE_MODE_DPL2:
     default:
         return 2;
@@ -79,17 +80,15 @@ static Uint32 WIIUAUDIO_FallbackChannelCount(AXDeviceType type, AXDeviceMode mod
 
 static Uint32 WIIUAUDIO_QueryChannelCount(AXDeviceType type, Uint32 fallback)
 {
+    AXDeviceMode mode = AX_DEVICE_MODE_STEREO;
     Uint32 count = 0;
+
+    if (AXGetDeviceMode(type, &mode) == AX_RESULT_SUCCESS) {
+        return WIIUAUDIO_FallbackChannelCount(type, mode);
+    }
 
     if ((AXGetDeviceChannelCount(type, 0, &count) == AX_RESULT_SUCCESS) && (count > 0)) {
         return count;
-    }
-
-    {
-        AXDeviceMode mode = AX_DEVICE_MODE_STEREO;
-        if (AXGetDeviceMode(type, &mode) == AX_RESULT_SUCCESS) {
-            return WIIUAUDIO_FallbackChannelCount(type, mode);
-        }
     }
 
     return fallback;
@@ -364,10 +363,10 @@ static bool WIIUAUDIO_OpenPlaybackDevice(SDL_AudioDevice *device)
 {
     const SDL_AudioFormat *closefmts = SDL_ClosestAudioFormats(device->spec.format);
     SDL_AudioFormat test_format = 0;
+    const Uint8 requested_channels = device->spec.channels;
     Uint32 mixlen;
     Uint32 runtime_sample_rate;
     Uint32 runtime_frame_samples;
-    Uint32 tv_channels;
     Uint32 ring_bytes;
 
     while ((test_format = *(closefmts++)) != 0) {
@@ -385,12 +384,10 @@ static bool WIIUAUDIO_OpenPlaybackDevice(SDL_AudioDevice *device)
         return false;
     }
 
-    tv_channels = WIIUAUDIO_QueryChannelCount(AX_DEVICE_TYPE_TV, 2);
-    device->hidden->tv_channels = SDL_min(tv_channels, (Uint32)WIIU_AUDIO_MAX_TV_CHANNELS);
-    device->hidden->drc_channels = SDL_min(WIIUAUDIO_QueryChannelCount(AX_DEVICE_TYPE_DRC, 2),
-                                           (Uint32)WIIU_AUDIO_MAX_DRC_CHANNELS);
+    device->hidden->tv_channels = SDL_min(WIIUAUDIO_QueryChannelCount(AX_DEVICE_TYPE_TV, 2), (Uint32)WIIU_AUDIO_MAX_TV_CHANNELS);
+    device->hidden->drc_channels = SDL_min(WIIUAUDIO_QueryChannelCount(AX_DEVICE_TYPE_DRC, 2), (Uint32)WIIU_AUDIO_MAX_DRC_CHANNELS);
     device->hidden->playback_channels =
-        WIIUAUDIO_GetPreferredPlaybackChannels((Uint32)device->spec.channels, device->hidden->tv_channels);
+        WIIUAUDIO_GetPreferredPlaybackChannels((Uint32)requested_channels, device->hidden->tv_channels);
     device->spec.channels = (Uint8)device->hidden->playback_channels;
 
     if (!WIIUAUDIO_SetDeviceChannelMap(device)) {
@@ -686,23 +683,7 @@ static void WIIUAUDIO_CloseDevice(SDL_AudioDevice *device)
 
 static void WIIUAUDIO_DetectDevices(SDL_AudioDevice **default_playback, SDL_AudioDevice **default_recording)
 {
-    SDL_AudioSpec playback_spec;
-    Uint32 runtime_sample_rate;
-    Uint32 runtime_frame_samples;
-
-    SDL_zero(playback_spec);
-
-    if (SDL_WIIU_AX_Acquire(&runtime_sample_rate, &runtime_frame_samples)) {
-        const Uint32 tv_channels = WIIUAUDIO_QueryChannelCount(AX_DEVICE_TYPE_TV, 2);
-        (void)runtime_frame_samples;
-        playback_spec.format = SDL_AUDIO_S16;
-        playback_spec.channels = (Uint8)WIIUAUDIO_GetPreferredPlaybackChannels(tv_channels, tv_channels);
-        playback_spec.freq = (int)runtime_sample_rate;
-        SDL_WIIU_AX_Release();
-        *default_playback = SDL_AddAudioDevice(false, WIIUAUDIO_PLAYBACK_NAME, &playback_spec, (void *)((size_t)0x1));
-    } else {
-        *default_playback = SDL_AddAudioDevice(false, WIIUAUDIO_PLAYBACK_NAME, NULL, (void *)((size_t)0x1));
-    }
+    *default_playback = SDL_AddAudioDevice(false, WIIUAUDIO_PLAYBACK_NAME, NULL, (void *)((size_t)0x1));
 
     *default_recording = SDL_AddAudioDevice(true, WIIUAUDIO_RECORDING_NAME, NULL, (void *)((size_t)0x2));
 }
