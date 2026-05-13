@@ -28,16 +28,34 @@ static bool SDL_WIIU_kpad_foreground_owned = true;
 static Uint64 SDL_WIIU_kpad_cycle;
 static Uint64 SDL_WIIU_kpad_sample_cycle[WIIU_MAX_KPAD_CHANNELS];
 static SDL_WiiUKPADState SDL_WIIU_kpad_state[WIIU_MAX_KPAD_CHANNELS];
+static bool SDL_WIIU_kpad_pointer_tuned[WIIU_MAX_KPAD_CHANNELS];
+
+#define SDL_WIIU_KPAD_POINTER_PLAY_RADIUS 0.05f
+#define SDL_WIIU_KPAD_POINTER_SENSITIVITY 1.0f
 
 static void SDL_WIIU_ResetKPADState(void)
 {
     int i;
 
     SDL_zero(SDL_WIIU_kpad_state);
+    SDL_zero(SDL_WIIU_kpad_pointer_tuned);
     SDL_WIIU_kpad_cycle = 0;
     for (i = 0; i < WIIU_MAX_KPAD_CHANNELS; ++i) {
         SDL_WIIU_kpad_sample_cycle[i] = SDL_MAX_UINT64;
     }
+}
+
+static void SDL_WIIU_TuneKPADPointer(int channel)
+{
+    const KPADChan kpad_channel = (KPADChan)channel;
+
+    if (channel < 0 || channel >= WIIU_MAX_KPAD_CHANNELS || SDL_WIIU_kpad_pointer_tuned[channel]) {
+        return;
+    }
+
+    KPADSetPosParam(kpad_channel, SDL_WIIU_KPAD_POINTER_PLAY_RADIUS, SDL_WIIU_KPAD_POINTER_SENSITIVITY);
+    KPADSetPosPlayMode(kpad_channel, KPAD_PLAY_MODE_TIGHT);
+    SDL_WIIU_kpad_pointer_tuned[channel] = true;
 }
 
 static bool SDL_WIIU_StartKPADRuntime(void)
@@ -181,10 +199,12 @@ bool SDL_WIIU_EnsureKPADDataFormat(int channel, WPADDataFormat format, bool enab
             KPADEnableAimingMode(kpad_channel);
             SDL_WIIU_kpad_sample_cycle[channel] = SDL_MAX_UINT64;
         }
+        SDL_WIIU_TuneKPADPointer(channel);
         return (current_format == format || WPADGetDataFormat(wpad_channel) == format);
     }
 
     KPADDisableDPD(kpad_channel);
+    SDL_WIIU_kpad_pointer_tuned[channel] = false;
 
     if (current_format != format) {
         const WPADError error = WPADSetDataFormat(wpad_channel, format);
