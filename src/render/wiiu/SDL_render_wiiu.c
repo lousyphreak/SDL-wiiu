@@ -6,7 +6,6 @@
 
 #include "../../video/SDL_pixels_c.h"
 #include "../../video/SDL_yuv_c.h"
-#include "../../video/SDL_sysvideo.h"
 #include "../../video/wiiu/SDL_wiiugfx.h"
 #include "../../video/wiiu/SDL_wiiuvideo.h"
 #include "../../core/wiiu/SDL_wiiulifecycle.h"
@@ -98,8 +97,7 @@ typedef struct WIIU_PaletteData
 
 typedef struct WIIU_RenderData
 {
-    SDL_VideoDevice *device;
-    SDL_VideoData *video;
+    SDL_PropertiesID window_props;
     GX2ContextState *context_state;
     SDL_WiiUShaderGroup shader;
     GX2RBuffer vertex_buffer;
@@ -148,6 +146,10 @@ typedef struct WIIU_RenderData
     const GX2Texture *bound_pixel_texture0;
     const GX2Texture *bound_pixel_texture1;
     const GX2Texture *bound_pixel_texture2;
+    GX2ColorBuffer *output_color_buffer_tv;
+    GX2ColorBuffer *output_color_buffer_drc;
+    Uint32 output_present_mask;
+    Uint32 output_foreground_generation;
     int vsync;
     Uint32 logged_foreground_generation_present;
 } WIIU_RenderData;
@@ -530,6 +532,20 @@ static void WIIU_DestroyTextureData(WIIU_TextureData *texturedata)
     SDL_zero(*texturedata);
 }
 
+static void WIIU_RefreshWindowOutputState(SDL_Renderer *renderer)
+{
+    WIIU_RenderData *data = (WIIU_RenderData *)renderer->internal;
+
+    if (!data->window_props) {
+        data->window_props = SDL_GetWindowProperties(renderer->window);
+    }
+
+    data->output_color_buffer_tv = (GX2ColorBuffer *)SDL_GetPointerProperty(data->window_props, SDL_PROP_WINDOW_WIIU_TV_COLOR_BUFFER_POINTER, NULL);
+    data->output_color_buffer_drc = (GX2ColorBuffer *)SDL_GetPointerProperty(data->window_props, SDL_PROP_WINDOW_WIIU_DRC_COLOR_BUFFER_POINTER, NULL);
+    data->output_present_mask = (Uint32)SDL_GetNumberProperty(data->window_props, SDL_PROP_WINDOW_WIIU_PRESENT_OUTPUT_MASK_NUMBER, 0);
+    data->output_foreground_generation = (Uint32)SDL_GetNumberProperty(data->window_props, SDL_PROP_WINDOW_WIIU_FOREGROUND_GENERATION_NUMBER, 0);
+}
+
 void SDL_WIIU_ReleaseForegroundRendererResources(SDL_Renderer *renderer, MEMHeapHandle mem1_heap, MEMHeapHandle foreground_heap)
 {
     WIIU_RenderData *data;
@@ -643,24 +659,13 @@ static bool WIIU_EnsureBackbuffer(SDL_Renderer *renderer)
 static GX2ColorBuffer *WIIU_GetOutputColorBuffer(SDL_Renderer *renderer)
 {
     WIIU_RenderData *data = (WIIU_RenderData *)renderer->internal;
-    const bool render_tv = SDL_WIIU_GetOutputWindow(data->device, SDL_WIIU_DISPLAY_TV) == renderer->window;
-    const bool render_drc = data->video->drc_connected && (SDL_WIIU_GetOutputWindow(data->device, SDL_WIIU_DISPLAY_DRC) == renderer->window);
 
-    if (!data->video->foreground_ready) {
-        return NULL;
+    if (data->output_color_buffer_tv) {
+        return data->output_color_buffer_tv;
     }
 
-    if (render_tv && data->video->tv.color_buffer.surface.image) {
-        return &data->video->tv.color_buffer;
-    }
-
-    if (render_drc) {
-        if (data->video->drc_uses_tv_render_buffer) {
-            return data->video->tv.color_buffer.surface.image ? &data->video->tv.color_buffer : NULL;
-        }
-        if (data->video->drc.color_buffer.surface.image) {
-            return &data->video->drc.color_buffer;
-        }
+    if (data->output_color_buffer_drc) {
+        return data->output_color_buffer_drc;
     }
 
     return NULL;
@@ -887,7 +892,7 @@ static bool WIIU_ApplyDrawState(SDL_Renderer *renderer, SDL_RenderCommand *cmd)
     WIIU_TextureData *texturedata = cmd->data.draw.texture ? (WIIU_TextureData *)cmd->data.draw.texture->internal : NULL;
     const SDL_ScaleMode scale_mode = texturedata ? cmd->data.draw.texture_scale_mode : SDL_SCALEMODE_NEAREST;
     SDL_Rect viewport = data->viewport;
-    GX2ColorBuffer *color_buffer = WIIU_GetCurrentColorBuffer(renderer);
+    GX2ColorBuffer *color_buffer;
     float transform[4];
     float texture_type[4] = { WIIU_TEXTURE_TYPE_NONE, 0.0f, 0.0f, 0.0f };
     float texel_size[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
@@ -898,6 +903,8 @@ static bool WIIU_ApplyDrawState(SDL_Renderer *renderer, SDL_RenderCommand *cmd)
         1.0f, 1.772f, 0.0f, 0.0f
     };
 
+    WIIU_RefreshWindowOutputState(renderer);
+    color_buffer = WIIU_GetCurrentColorBuffer(renderer);
     if (!color_buffer) {
         return SDL_SetError("Wii U render target is unavailable");
     }
@@ -1017,12 +1024,6 @@ static bool WIIU_ApplyDrawState(SDL_Renderer *renderer, SDL_RenderCommand *cmd)
         }
     }
 
-    return true;
-}
-
-static bool WIIU_RenderToScanTarget(const GX2ColorBuffer *color_buffer, GX2ScanTarget scan_target)
-{
-    GX2CopyColorBufferToScanBuffer(color_buffer, scan_target);
     return true;
 }
 
@@ -1699,6 +1700,7 @@ static bool WIIU_RunCommandQueue(SDL_Renderer *renderer, SDL_RenderCommand *cmd,
     GX2ColorBuffer *color_buffer;
     size_t vertex_offset = 0;
 
+    WIIU_RefreshWindowOutputState(renderer);
     if (!renderer->target && !WIIU_GetOutputColorBuffer(renderer) && !WIIU_EnsureBackbuffer(renderer)) {
         return false;
     }
@@ -1819,6 +1821,7 @@ static SDL_Surface *WIIU_RenderReadPixels(SDL_Renderer *renderer, const SDL_Rect
     int row;
     const int pitch = rect->w * 4;
 
+    WIIU_RefreshWindowOutputState(renderer);
     if (!renderer->target && !WIIU_GetOutputColorBuffer(renderer) && !WIIU_EnsureBackbuffer(renderer)) {
         return NULL;
     }
@@ -1871,14 +1874,16 @@ static SDL_Surface *WIIU_RenderReadPixels(SDL_Renderer *renderer, const SDL_Rect
 static bool WIIU_RenderPresent(SDL_Renderer *renderer)
 {
     WIIU_RenderData *data = (WIIU_RenderData *)renderer->internal;
-    SDL_WiiUScanTarget *tv_target = &data->video->tv;
-    SDL_WiiUScanTarget *drc_target = &data->video->drc;
-    const bool render_tv = SDL_WIIU_GetOutputWindow(data->device, SDL_WIIU_DISPLAY_TV) == renderer->window;
-    const bool render_drc = data->video->drc_connected && (SDL_WIIU_GetOutputWindow(data->device, SDL_WIIU_DISPLAY_DRC) == renderer->window);
-    const bool mirror_drc_from_tv = data->video->drc_uses_tv_render_buffer && render_tv && render_drc;
-    const Uint32 foreground_generation = data->video->foreground_generation;
-    const bool first_present_after_acquire = (foreground_generation != 0) && (data->logged_foreground_generation_present != foreground_generation);
-    Uint32 rendered_outputs = 0;
+    Uint32 output_mask;
+    Uint32 foreground_generation;
+    bool first_present_after_acquire;
+    bool has_output_buffers;
+
+    WIIU_RefreshWindowOutputState(renderer);
+    output_mask = data->output_present_mask;
+    foreground_generation = data->output_foreground_generation;
+    first_present_after_acquire = (foreground_generation != 0) && (data->logged_foreground_generation_present != foreground_generation);
+    has_output_buffers = (data->output_color_buffer_tv != NULL) || (data->output_color_buffer_drc != NULL);
 
     if (!SDL_WIIU_IsInForeground()) {
         if (first_present_after_acquire) {
@@ -1890,75 +1895,32 @@ static bool WIIU_RenderPresent(SDL_Renderer *renderer)
         return true;
     }
 
-    if (!data->video->foreground_ready) {
-        if (first_present_after_acquire) {
-            data->logged_foreground_generation_present = foreground_generation;
-            SDL_LogWarn(SDL_LOG_CATEGORY_RENDER,
-                        "WiiU render: first present after foreground acquire #%u skipped because foreground resources are still unavailable",
-                        (unsigned int)foreground_generation);
-        }
-        return true;
-    }
-
-    if ((!render_tv || !tv_target->scan_buffer) && (!render_drc || !drc_target->scan_buffer)) {
-        if (first_present_after_acquire) {
-            data->logged_foreground_generation_present = foreground_generation;
-            SDL_LogWarn(SDL_LOG_CATEGORY_RENDER,
-                        "WiiU render: first present after foreground acquire #%u skipped because no scan targets are active (render_tv=%d, render_drc=%d, tv_buffer=%p, drc_buffer=%p)",
-                        (unsigned int)foreground_generation,
-                        render_tv ? 1 : 0,
-                        render_drc ? 1 : 0,
-                        tv_target->scan_buffer,
-                        drc_target->scan_buffer);
-        }
-        return true;
-    }
-
-    if (data->vsync) {
+    if (data->vsync && (output_mask || has_output_buffers)) {
         SDL_WIIU_BeginRender();
     }
-
-    if (render_tv && tv_target->scan_buffer) {
-        if (!WIIU_RenderToScanTarget(&tv_target->color_buffer, GX2_SCAN_TARGET_TV)) {
-            return false;
-        }
-        rendered_outputs |= SDL_WIIU_PRESENT_OUTPUT_TV;
+    if (!SDL_WIIU_SwapWindow(renderer->window)) {
+        return false;
     }
-
-    if (mirror_drc_from_tv && tv_target->scan_buffer && drc_target->scan_buffer) {
-        if (!WIIU_RenderToScanTarget(&tv_target->color_buffer, GX2_SCAN_TARGET_DRC)) {
-            return false;
-        }
-        rendered_outputs |= SDL_WIIU_PRESENT_OUTPUT_DRC;
-    } else if (render_drc && drc_target->scan_buffer) {
-        if (!WIIU_RenderToScanTarget(&drc_target->color_buffer, GX2_SCAN_TARGET_DRC)) {
-            return false;
-        }
-        rendered_outputs |= SDL_WIIU_PRESENT_OUTPUT_DRC;
-    }
-
-    if (!SDL_WIIU_ShouldSwapPresent(data->device, rendered_outputs)) {
-        if (first_present_after_acquire) {
-            data->logged_foreground_generation_present = foreground_generation;
-            SDL_LogInfo(SDL_LOG_CATEGORY_RENDER,
-                        "WiiU render: first present after foreground acquire #%u deferred until the remaining output window presents",
-                        (unsigned int)foreground_generation);
-        }
-        return true;
-    }
-
-    GX2SwapScanBuffers();
-    GX2SetTVEnable(TRUE);
-    GX2SetDRCEnable(data->video->drc_connected ? TRUE : FALSE);
     if (first_present_after_acquire) {
         data->logged_foreground_generation_present = foreground_generation;
-        SDL_LogInfo(SDL_LOG_CATEGORY_RENDER,
-                    "WiiU render: first present after foreground acquire #%u completed (render_tv=%d, render_drc=%d, tv_buffer=%p, drc_buffer=%p)",
-                    (unsigned int)foreground_generation,
-                    render_tv ? 1 : 0,
-                    render_drc ? 1 : 0,
-                    tv_target->scan_buffer,
-                    drc_target->scan_buffer);
+        if (output_mask) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_RENDER,
+                        "WiiU render: first present after foreground acquire #%u processed through SDL_WIIU_SwapWindow() (outputs=%u, tv_color=%p, drc_color=%p)",
+                        (unsigned int)foreground_generation,
+                        output_mask,
+                        data->output_color_buffer_tv,
+                        data->output_color_buffer_drc);
+        } else if (has_output_buffers) {
+            SDL_LogInfo(SDL_LOG_CATEGORY_RENDER,
+                        "WiiU render: first present after foreground acquire #%u submitted through SDL_WIIU_SwapWindow() before SDL marked the outputs presentable (tv_color=%p, drc_color=%p)",
+                        (unsigned int)foreground_generation,
+                        data->output_color_buffer_tv,
+                        data->output_color_buffer_drc);
+        } else {
+            SDL_LogWarn(SDL_LOG_CATEGORY_RENDER,
+                        "WiiU render: first present after foreground acquire #%u skipped because no SDL-managed GX2 render targets are published yet",
+                        (unsigned int)foreground_generation);
+        }
     }
     return true;
 }
@@ -2007,7 +1969,6 @@ static bool WIIU_CreateRenderer(SDL_Renderer *renderer, SDL_Window *window, SDL_
 {
     WIIU_RenderData *data = (WIIU_RenderData *)SDL_calloc(1, sizeof(*data));
     int32_t sampler_location;
-    SDL_VideoDevice *device = SDL_GetVideoDevice();
 
     if (!data) {
         return false;
@@ -2017,13 +1978,6 @@ static bool WIIU_CreateRenderer(SDL_Renderer *renderer, SDL_Window *window, SDL_
     if (renderer->output_colorspace != SDL_COLORSPACE_SRGB) {
         SDL_free(data);
         return SDL_SetError("Unsupported output colorspace");
-    }
-
-    data->device = device;
-    data->video = device ? (SDL_VideoData *)device->internal : NULL;
-    if (!data->video) {
-        SDL_free(data);
-        return SDL_SetError("Wii U video device is unavailable");
     }
 
     renderer->internal = data;
@@ -2131,6 +2085,7 @@ static bool WIIU_CreateRenderer(SDL_Renderer *renderer, SDL_Window *window, SDL_
     renderer->SetVSync = WIIU_SetVSync;
     renderer->internal = data;
     renderer->window = window;
+    data->window_props = SDL_GetWindowProperties(window);
     renderer->name = WIIU_RenderDriver.name;
     renderer->npot_texture_wrap_unsupported = true;
     renderer->line_method = SDL_RENDERLINEMETHOD_LINES;

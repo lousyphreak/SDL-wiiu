@@ -361,6 +361,14 @@ struct SDL_VideoDevice
     void (*Metal_DestroyView)(SDL_VideoDevice *_this, SDL_MetalView view);
     void *(*Metal_GetLayer)(SDL_VideoDevice *_this, SDL_MetalView view);
 
+#ifdef SDL_PLATFORM_WIIU
+    /* * * */
+    /*
+     * Wii U GX2 support
+     */
+    bool (*WIIU_SwapWindow)(SDL_VideoDevice *_this, SDL_Window *window);
+#endif
+
     /* * * */
     /*
      * Event manager functions

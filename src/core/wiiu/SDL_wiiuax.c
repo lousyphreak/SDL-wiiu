@@ -36,15 +36,24 @@ typedef struct SDL_WiiUAXState
 
 static SDL_WiiUAXState SDL_wiiu_ax;
 
-static void SDL_WIIU_AX_WaitForAudioOutReady(void)
+static bool SDL_WIIU_AX_TryInitWithParams(const AXInitParams *params, AXInitError *init_error)
 {
-    for (int attempt = 0; attempt < 200; ++attempt) {
-        if (AXIsAudioOutReady()) {
-            return;
-        }
+    AXInitError local_error = AX_INIT_ERROR_OK;
 
-        SDL_Delay(10);
+    if (init_error) {
+        *init_error = AX_INIT_ERROR_OK;
     }
+
+    local_error = AXInitWithParams((AXInitParams *)params);
+    if (init_error) {
+        *init_error = local_error;
+    }
+
+    if (AXIsInit()) {
+        return true;
+    }
+
+    return (local_error == AX_INIT_ERROR_OK) || (local_error == AX_INIT_ERROR_ALREADY_INITIALIZED);
 }
 
 static bool SDL_WIIU_AX_EnsureLock(void)
@@ -74,17 +83,21 @@ bool SDL_WIIU_AX_Acquire(Uint32 *sample_rate, Uint32 *frame_samples)
     SDL_LockMutex(SDL_wiiu_ax.lock);
 
     if (SDL_wiiu_ax.refcount == 0) {
-        SDL_WIIU_AX_WaitForAudioOutReady();
         if (!AXIsInit()) {
             AXInitParams params = {
                 AX_INIT_RENDERER_48KHZ,
                 AX_INIT_FRAME_SIZE_3MS,
                 AX_INIT_PIPELINE_SINGLE
             };
-            const AXInitError init_error = AXInitWithParams(&params);
-            if ((init_error != AX_INIT_ERROR_OK) && (init_error != AX_INIT_ERROR_ALREADY_INITIALIZED)) {
-                SDL_UnlockMutex(SDL_wiiu_ax.lock);
-                return SDL_SetError("AXInitWithParams failed: %d", (int)init_error);
+            AXInitError init_error = AX_INIT_ERROR_OK;
+
+            if (!SDL_WIIU_AX_TryInitWithParams(&params, &init_error)) {
+                AXInit();
+                if (!AXIsInit()) {
+                    SDL_UnlockMutex(SDL_wiiu_ax.lock);
+                    return SDL_SetError("AX initialization failed after AXInitWithParams returned %d",
+                                        (int)init_error);
+                }
             }
             SDL_wiiu_ax.initialized_by_sdl = true;
         } else {

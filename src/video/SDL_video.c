@@ -38,6 +38,10 @@
 #include "../render/SDL_sysrender.h"
 #include "../main/SDL_main_callbacks.h"
 
+#ifdef SDL_PLATFORM_WIIU
+#include <SDL3/SDL_wiiu.h>
+#endif
+
 #ifdef SDL_VIDEO_OPENGL
 #include <SDL3/SDL_opengl.h>
 #endif // SDL_VIDEO_OPENGL
@@ -6509,6 +6513,20 @@ void *SDL_Metal_GetLayer(SDL_MetalView view)
         return NULL;
     }
 }
+
+#ifdef SDL_PLATFORM_WIIU
+bool SDL_WIIU_SwapWindow(SDL_Window *window)
+{
+    CHECK_WINDOW_MAGIC(window, false);
+
+    if (!_this->WIIU_SwapWindow) {
+        SDL_Unsupported();
+        return false;
+    }
+
+    return _this->WIIU_SwapWindow(_this, window);
+}
+#endif
 
 #if defined(SDL_VIDEO_DRIVER_X11) || defined(SDL_VIDEO_DRIVER_WAYLAND) || defined(SDL_VIDEO_DRIVER_EMSCRIPTEN)
 const char *SDL_GetCSSCursorName(SDL_SystemCursor id, const char **fallback_name)

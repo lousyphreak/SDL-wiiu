@@ -1,0 +1,80 @@
+/*
+  Simple DirectMedia Layer
+  Copyright (C) 1997-2026 Sam Lantinga <slouken@libsdl.org>
+
+  This software is provided 'as-is', without any express or implied
+  warranty.  In no event will the authors be held liable for any damages
+  arising from the use of this software.
+
+  Permission is granted to anyone to use this software for any purpose,
+  including commercial applications, and to alter it and redistribute it
+  freely, subject to the following restrictions:
+
+  1. The origin of this software must not be misrepresented; you must not
+     claim that you wrote the original software. If you use this software
+     in a product, an acknowledgment in the product documentation would be
+     appreciated but is not required.
+  2. Altered source versions must be plainly marked as such, and must not be
+     misrepresented as being the original software.
+  3. This notice may not be removed or altered from any source distribution.
+*/
+
+/**
+ * # CategoryWiiU
+ *
+ * Functions for using GX2 directly with SDL-managed Wii U windows.
+ *
+ * Use SDL_GetWindowProperties() with the `SDL_PROP_WINDOW_WIIU_*` properties
+ * from SDL_video.h to retrieve the current GX2 color buffers and context
+ * states owned by SDL for a window. These handles can change whenever SDL
+ * rebuilds foreground-owned GX2 resources or reroutes TV/DRC output, so
+ * applications should refresh cached handles when
+ * `SDL_PROP_WINDOW_WIIU_FOREGROUND_GENERATION_NUMBER` changes.
+ */
+
+#ifndef SDL_wiiu_h_
+#define SDL_wiiu_h_
+
+#include <SDL3/SDL_video.h>
+
+#include <SDL3/SDL_begin_code.h>
+/* Set up for C function definitions, even when using C++ */
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef Uint32 SDL_WiiUPresentOutputFlags;
+
+#define SDL_WIIU_PRESENT_OUTPUT_NONE 0x0u
+#define SDL_WIIU_PRESENT_OUTPUT_TV   0x1u
+#define SDL_WIIU_PRESENT_OUTPUT_DRC  0x2u
+
+/**
+ * Present the current GX2 color buffers for a Wii U window.
+ *
+ * This copies the window's active GX2 color buffers to the SDL-managed scan
+ * buffers and performs the swap/present sequence for the outputs currently
+ * owned by the window.
+ *
+ * If TV and DRC are being driven by separate SDL windows, each active output
+ * window should call this once per frame after finishing its GX2 rendering.
+ *
+ * \param window the window to present.
+ * \returns true on success or false on failure; call SDL_GetError() for more
+ *          information.
+ *
+ * \threadsafety This function should only be called on the main thread.
+ *
+ * \since This function is available since SDL 3.5.0.
+ *
+ * \sa SDL_GetWindowProperties
+ */
+extern SDL_DECLSPEC bool SDLCALL SDL_WIIU_SwapWindow(SDL_Window *window);
+
+/* Ends C function definitions when using C++ */
+#ifdef __cplusplus
+}
+#endif
+#include <SDL3/SDL_close_code.h>
+
+#endif /* SDL_wiiu_h_ */

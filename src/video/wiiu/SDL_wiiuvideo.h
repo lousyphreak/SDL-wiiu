@@ -24,6 +24,7 @@
 #define SDL_wiiuvideo_h_
 
 #include "../SDL_sysvideo.h"
+#include <SDL3/SDL_wiiu.h>
 
 #include <coreinit/memheap.h>
 #include <gx2/context.h>
@@ -35,8 +36,6 @@
 #include <gx2r/buffer.h>
 
 #define WIIU_SCAN_BUFFER_COUNT 2
-#define SDL_WIIU_PRESENT_OUTPUT_TV 0x1u
-#define SDL_WIIU_PRESENT_OUTPUT_DRC 0x2u
 
 typedef enum SDL_WiiUDisplayKind
 {
@@ -132,6 +131,7 @@ extern bool SDL_WIIU_CreateWindowFramebuffer(SDL_VideoDevice *_this, SDL_Window 
 extern bool SDL_WIIU_SetWindowFramebufferVSync(SDL_VideoDevice *_this, SDL_Window *window, int vsync);
 extern bool SDL_WIIU_GetWindowFramebufferVSync(SDL_VideoDevice *_this, SDL_Window *window, int *vsync);
 extern bool SDL_WIIU_UpdateWindowFramebuffer(SDL_VideoDevice *_this, SDL_Window *window, const SDL_Rect *rects, int numrects);
+extern bool SDL_WIIU_GX2SwapWindow(SDL_VideoDevice *_this, SDL_Window *window);
 extern void SDL_WIIU_DestroyWindowFramebuffer(SDL_VideoDevice *_this, SDL_Window *window);
 
 extern void SDL_WIIU_PumpEvents(SDL_VideoDevice *_this);

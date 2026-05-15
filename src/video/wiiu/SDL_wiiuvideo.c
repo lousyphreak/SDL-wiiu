@@ -75,6 +75,8 @@ static bool SDL_WIIU_SetDisplayMode(SDL_VideoDevice *_this, SDL_VideoDisplay *di
 static bool SDL_WIIU_CreateWindow(SDL_VideoDevice *_this, SDL_Window *window, SDL_PropertiesID create_props);
 static void SDL_WIIU_DestroyWindow(SDL_VideoDevice *_this, SDL_Window *window);
 static SDL_DisplayID SDL_WIIU_GetDisplayForWindow(SDL_VideoDevice *_this, SDL_Window *window);
+static void SDL_WIIU_SetWindowSize(SDL_VideoDevice *_this, SDL_Window *window);
+static bool SDL_WIIU_SyncWindow(SDL_VideoDevice *_this, SDL_Window *window);
 static void SDL_WIIU_GetWindowSizeInPixels(SDL_VideoDevice *_this, SDL_Window *window, int *w, int *h);
 static float SDL_WIIU_GetWindowContentScale(SDL_VideoDevice *_this, SDL_Window *window);
 static bool SDL_WIIU_StartTextInput(SDL_VideoDevice *_this, SDL_Window *window, SDL_PropertiesID props);
@@ -97,6 +99,9 @@ static bool SDL_WIIU_AddDisplay(SDL_VideoData *driverdata, SDL_WiiUDisplayKind k
 static void SDL_WIIU_DRCConnectCallback(uint32_t drc_slot, BOOL attached);
 static bool SDL_WIIU_IsActiveWindow(SDL_Window *window);
 static int SDL_WIIU_GetActiveWindowCount(SDL_VideoDevice *_this);
+static Uint32 SDL_WIIU_GetWindowPresentOutputMask(SDL_VideoDevice *_this, SDL_Window *window);
+static void SDL_WIIU_UpdateWindowGX2Properties(SDL_VideoDevice *_this, SDL_Window *window);
+static void SDL_WIIU_UpdateAllWindowGX2Properties(SDL_VideoDevice *_this);
 static void SDL_WIIU_InitDisplayMode(SDL_DisplayMode *mode, SDL_DisplayID display_id, int w, int h);
 static bool SDL_WIIU_GetTVDisplaySize(GX2TVRenderMode render_mode, int *w, int *h);
 static int SDL_WIIU_GetMaxTVModeCount(void);
@@ -106,6 +111,7 @@ static const SDL_WiiUTVMode *SDL_WIIU_GetTVModeForSize(int w, int h);
 static const SDL_WiiUTVMode *SDL_WIIU_GetTVModeForRequest(int w, int h);
 static void SDL_WIIU_GetSupportedWindowSize(SDL_WiiUDisplayKind kind, int requested_w, int requested_h, int *out_w, int *out_h);
 static void SDL_WIIU_SetWindowSizeInternal(SDL_Window *window, int w, int h);
+static void SDL_WIIU_ApplyWindowSize(SDL_VideoDevice *_this, SDL_Window *window, int requested_w, int requested_h);
 static SDL_Window *SDL_WIIU_GetWindowForDisplay(SDL_VideoDevice *_this, SDL_DisplayID display_id);
 static const SDL_DisplayMode *SDL_WIIU_GetExactFullscreenDisplayMode(SDL_VideoDisplay *display, int w, int h);
 static void SDL_WIIU_UpdateDisplayLayout(SDL_VideoData *driverdata, int tv_height);
@@ -212,6 +218,94 @@ Uint32 SDL_WIIU_GetPresentOutputMask(SDL_VideoDevice *_this)
     }
 
     return mask;
+}
+
+static Uint32 SDL_WIIU_GetWindowPresentOutputMask(SDL_VideoDevice *_this, SDL_Window *window)
+{
+    SDL_VideoData *driverdata;
+    Uint32 mask = 0;
+
+    if (!_this || !_this->internal || !window || !window->internal) {
+        return 0;
+    }
+
+    driverdata = (SDL_VideoData *)_this->internal;
+    if (!driverdata->foreground_ready) {
+        return 0;
+    }
+
+    if (SDL_WIIU_GetOutputWindow(_this, SDL_WIIU_DISPLAY_TV) == window &&
+        driverdata->tv.scan_buffer && driverdata->tv.context_state) {
+        mask |= SDL_WIIU_PRESENT_OUTPUT_TV;
+    }
+
+    if (driverdata->drc_connected &&
+        SDL_WIIU_GetOutputWindow(_this, SDL_WIIU_DISPLAY_DRC) == window &&
+        driverdata->drc.scan_buffer) {
+        mask |= SDL_WIIU_PRESENT_OUTPUT_DRC;
+    }
+
+    return mask;
+}
+
+static void SDL_WIIU_UpdateWindowGX2Properties(SDL_VideoDevice *_this, SDL_Window *window)
+{
+    SDL_VideoData *driverdata = (_this && _this->internal) ? (SDL_VideoData *)_this->internal : NULL;
+    SDL_PropertiesID props;
+    GX2ColorBuffer *tv_color_buffer = NULL;
+    GX2ContextState *tv_context_state = NULL;
+    GX2ColorBuffer *drc_color_buffer = NULL;
+    GX2ContextState *drc_context_state = NULL;
+    Uint32 output_mask = 0;
+    Sint64 foreground_generation = 0;
+    bool owns_tv_output = false;
+    bool owns_drc_output = false;
+
+    if (!window) {
+        return;
+    }
+
+    props = SDL_GetWindowProperties(window);
+    if (driverdata) {
+        foreground_generation = (Sint64)driverdata->foreground_generation;
+    }
+
+    if (driverdata && window->internal) {
+        owns_tv_output = (SDL_WIIU_GetOutputWindow(_this, SDL_WIIU_DISPLAY_TV) == window);
+        owns_drc_output = driverdata->drc_connected && (SDL_WIIU_GetOutputWindow(_this, SDL_WIIU_DISPLAY_DRC) == window);
+        output_mask = SDL_WIIU_GetWindowPresentOutputMask(_this, window);
+        if (owns_tv_output &&
+            driverdata->tv.color_buffer.surface.image &&
+            driverdata->tv.context_state) {
+            tv_color_buffer = &driverdata->tv.color_buffer;
+            tv_context_state = driverdata->tv.context_state;
+        }
+        if (owns_drc_output &&
+            !driverdata->drc_uses_tv_render_buffer &&
+            driverdata->drc.color_buffer.surface.image &&
+            driverdata->drc.context_state) {
+            drc_color_buffer = &driverdata->drc.color_buffer;
+            drc_context_state = driverdata->drc.context_state;
+        }
+    }
+
+    SDL_SetPointerProperty(props, SDL_PROP_WINDOW_WIIU_TV_COLOR_BUFFER_POINTER, tv_color_buffer);
+    SDL_SetPointerProperty(props, SDL_PROP_WINDOW_WIIU_TV_CONTEXT_STATE_POINTER, tv_context_state);
+    SDL_SetPointerProperty(props, SDL_PROP_WINDOW_WIIU_DRC_COLOR_BUFFER_POINTER, drc_color_buffer);
+    SDL_SetPointerProperty(props, SDL_PROP_WINDOW_WIIU_DRC_CONTEXT_STATE_POINTER, drc_context_state);
+    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_WIIU_PRESENT_OUTPUT_MASK_NUMBER, (Sint64)output_mask);
+    SDL_SetNumberProperty(props, SDL_PROP_WINDOW_WIIU_FOREGROUND_GENERATION_NUMBER, foreground_generation);
+}
+
+static void SDL_WIIU_UpdateAllWindowGX2Properties(SDL_VideoDevice *_this)
+{
+    if (!_this) {
+        return;
+    }
+
+    for (SDL_Window *window = _this->windows; window; window = window->next) {
+        SDL_WIIU_UpdateWindowGX2Properties(_this, window);
+    }
 }
 
 bool SDL_WIIU_ShouldSwapPresent(SDL_VideoDevice *_this, Uint32 rendered_outputs)
@@ -494,6 +588,36 @@ static void SDL_WIIU_SetWindowSizeInternal(SDL_Window *window, int w, int h)
     SDL_copyp(&window->current_fullscreen_mode, &mode);
 }
 
+static void SDL_WIIU_ApplyWindowSize(SDL_VideoDevice *_this, SDL_Window *window, int requested_w, int requested_h)
+{
+    SDL_WindowData *windowdata;
+    SDL_VideoDisplay *display;
+    const SDL_DisplayMode *target_mode;
+    int supported_w;
+    int supported_h;
+
+    if (!_this || !window || !window->internal) {
+        return;
+    }
+
+    windowdata = window->internal;
+    SDL_WIIU_GetSupportedWindowSize(windowdata->display_kind, requested_w, requested_h, &supported_w, &supported_h);
+    display = SDL_GetVideoDisplay(windowdata->display_id);
+    target_mode = display ? SDL_WIIU_GetExactFullscreenDisplayMode(display, supported_w, supported_h) : NULL;
+
+    if (target_mode && display && target_mode != display->current_mode) {
+        if (SDL_SetDisplayModeForDisplay(display, (SDL_DisplayMode *)target_mode)) {
+            window->surface_valid = false;
+            return;
+        }
+        SDL_ClearError();
+    }
+
+    SDL_WIIU_SetWindowSizeInternal(window, supported_w, supported_h);
+    window->surface_valid = false;
+    SDL_WIIU_UpdateOutputWindows(_this);
+}
+
 static SDL_Window *SDL_WIIU_GetWindowForDisplay(SDL_VideoDevice *_this, SDL_DisplayID display_id)
 {
     for (SDL_Window *window = _this->windows; window; window = window->next) {
@@ -672,6 +796,7 @@ bool SDL_WIIU_UpdateOutputWindows(SDL_VideoDevice *_this)
 
     if (!SDL_WIIU_GetScanTargetConfiguration(&driverdata->tv, tv_window, &tv_render_width, &tv_render_height, &tv_scan_width, &tv_scan_height, &tv_render_mode, NULL) ||
         !SDL_WIIU_GetScanTargetConfiguration(&driverdata->drc, drc_window, &drc_render_width, &drc_render_height, &drc_scan_width, &drc_scan_height, NULL, &drc_render_mode)) {
+        SDL_WIIU_UpdateAllWindowGX2Properties(_this);
         return false;
     }
 
@@ -706,10 +831,12 @@ bool SDL_WIIU_UpdateOutputWindows(SDL_VideoDevice *_this)
         SDL_WIIU_ForegroundReleased(_this);
         SDL_WIIU_ForegroundAcquired(_this);
         if (!driverdata->foreground_ready) {
+            SDL_WIIU_UpdateAllWindowGX2Properties(_this);
             return false;
         }
     }
 
+    SDL_WIIU_UpdateAllWindowGX2Properties(_this);
     return true;
 }
 
@@ -749,6 +876,8 @@ static SDL_VideoDevice *SDL_WIIU_CreateDevice(void)
     device->CreateSDLWindow = SDL_WIIU_CreateWindow;
     device->DestroyWindow = SDL_WIIU_DestroyWindow;
     device->GetDisplayForWindow = SDL_WIIU_GetDisplayForWindow;
+    device->SetWindowSize = SDL_WIIU_SetWindowSize;
+    device->SyncWindow = SDL_WIIU_SyncWindow;
     device->GetWindowSizeInPixels = SDL_WIIU_GetWindowSizeInPixels;
     device->GetWindowContentScale = SDL_WIIU_GetWindowContentScale;
     device->PumpEvents = SDL_WIIU_PumpEvents;
@@ -761,6 +890,7 @@ static SDL_VideoDevice *SDL_WIIU_CreateDevice(void)
     device->GetWindowFramebufferVSync = SDL_WIIU_GetWindowFramebufferVSync;
     device->UpdateWindowFramebuffer = SDL_WIIU_UpdateWindowFramebuffer;
     device->DestroyWindowFramebuffer = SDL_WIIU_DestroyWindowFramebuffer;
+    device->WIIU_SwapWindow = SDL_WIIU_GX2SwapWindow;
     device->free = SDL_WIIU_DeleteDevice;
     device->device_caps = VIDEO_DEVICE_CAPS_FULLSCREEN_ONLY;
 
@@ -1059,6 +1189,7 @@ static void SDL_WIIU_DestroyForegroundResources(SDL_VideoDevice *_this, SDL_Vide
     SDL_WIIU_DestroyMEM1Heap(driverdata);
     SDL_WIIU_DestroyForegroundHeap(driverdata);
     driverdata->foreground_ready = false;
+    SDL_WIIU_UpdateAllWindowGX2Properties(_this);
 }
 
 static void SDL_WIIU_ForegroundAcquired(void *userdata)
@@ -1113,6 +1244,7 @@ static void SDL_WIIU_ForegroundAcquired(void *userdata)
     if (driverdata->foreground_generation == 0) {
         driverdata->foreground_generation = 1;
     }
+    SDL_WIIU_UpdateAllWindowGX2Properties(_this);
     if (!SDL_WIIU_KPADForegroundAcquired()) {
         SDL_LogError(SDL_LOG_CATEGORY_INPUT, "WiiU video: failed to restart KPAD runtime after foreground reacquire");
     }
@@ -1170,6 +1302,7 @@ static void SDL_WIIU_DRCConnectCallback(uint32_t drc_slot, BOOL attached)
     driverdata = (SDL_VideoData *)_this->internal;
     driverdata->drc_connected = attached ? true : false;
     driverdata->pending_present_mask = 0;
+    SDL_WIIU_UpdateAllWindowGX2Properties(_this);
     SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO,
                 "WiiU video: DRC callback (slot=%u, attached=%d, foreground=%d)",
                 (unsigned int)drc_slot,
@@ -1364,6 +1497,7 @@ static bool SDL_WIIU_SetDisplayMode(SDL_VideoDevice *_this, SDL_VideoDisplay *di
     window = SDL_WIIU_GetWindowForDisplay(_this, display->id);
     if (window) {
         SDL_WIIU_SetWindowSizeInternal(window, target_w, target_h);
+        window->surface_valid = false;
     }
 
     return SDL_WIIU_UpdateOutputWindows(_this);
@@ -1483,9 +1617,36 @@ static SDL_DisplayID SDL_WIIU_GetDisplayForWindow(SDL_VideoDevice *_this, SDL_Wi
     return windowdata->display_id;
 }
 
+static void SDL_WIIU_SetWindowSize(SDL_VideoDevice *_this, SDL_Window *window)
+{
+    const int requested_w = window->last_size_pending ? window->pending.w : window->w;
+    const int requested_h = window->last_size_pending ? window->pending.h : window->h;
+
+    SDL_WIIU_ApplyWindowSize(_this, window, requested_w, requested_h);
+}
+
+static bool SDL_WIIU_SyncWindow(SDL_VideoDevice *_this, SDL_Window *window)
+{
+    (void)window;
+    return SDL_WIIU_UpdateOutputWindows(_this);
+}
+
 static void SDL_WIIU_GetWindowSizeInPixels(SDL_VideoDevice *_this, SDL_Window *window, int *w, int *h)
 {
     (void)_this;
+
+    if (window && (window->flags & SDL_WINDOW_FULLSCREEN) != 0) {
+        const SDL_DisplayMode *fullscreen_mode = SDL_GetWindowFullscreenMode(window);
+        if (fullscreen_mode) {
+            if (w) {
+                *w = fullscreen_mode->w;
+            }
+            if (h) {
+                *h = fullscreen_mode->h;
+            }
+            return;
+        }
+    }
 
     if (w) {
         *w = window ? window->w : 0;
