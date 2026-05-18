@@ -48,9 +48,6 @@
 
 #define WIIU_SURFACE "SDL.internal.window.surface"
 #define WIIU_BLIT_VERTEX_COUNT 6
-#define WIIU_STARTUP_TRACE_FRAMES 50
-
-static int SDL_WIIU_startup_trace_swaps = 0;
 
 static SDL_WiiUScanTarget *SDL_WIIU_GetScanTarget(SDL_VideoData *driverdata, SDL_WiiUDisplayKind kind)
 {
@@ -392,129 +389,43 @@ bool SDL_WIIU_GX2SwapWindow(SDL_VideoDevice *_this, SDL_Window *window)
     SDL_WindowData *windowdata = window ? window->internal : NULL;
     SDL_WiiUScanTarget *tv_target;
     SDL_WiiUScanTarget *drc_target;
-    const int trace_frame = ++SDL_WIIU_startup_trace_swaps;
-    const bool startup_trace = trace_frame <= WIIU_STARTUP_TRACE_FRAMES;
     const bool render_tv = SDL_WIIU_GetOutputWindow(_this, SDL_WIIU_DISPLAY_TV) == window;
     const bool render_drc = driverdata->drc_connected && (SDL_WIIU_GetOutputWindow(_this, SDL_WIIU_DISPLAY_DRC) == window);
     const bool mirror_drc_from_tv = driverdata->drc_uses_tv_render_buffer && render_tv && render_drc;
     Uint32 rendered_outputs = 0;
 
-    if (startup_trace) {
-        SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO,
-                    "WiiU startup swap entry: frame=%d window=%p render_tv=%d render_drc=%d mirror_drc=%d foreground=%d foreground_ready=%d drc_connected=%d expected=0x%x",
-                    trace_frame,
-                    (void *)window,
-                    render_tv ? 1 : 0,
-                    render_drc ? 1 : 0,
-                    mirror_drc_from_tv ? 1 : 0,
-                    SDL_WIIU_IsInForeground() ? 1 : 0,
-                    driverdata->foreground_ready ? 1 : 0,
-                    driverdata->drc_connected ? 1 : 0,
-                    (unsigned int)SDL_WIIU_GetPresentOutputMask(_this));
-    }
-
     if (!windowdata) {
-        if (startup_trace) {
-            SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO, "WiiU startup swap abort: frame=%d missing windowdata", trace_frame);
-        }
         return SDL_SetError("Wii U window data is unavailable");
     }
 
     if (!SDL_WIIU_IsInForeground()) {
-        if (startup_trace) {
-            SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO, "WiiU startup swap skip: frame=%d app not in foreground", trace_frame);
-        }
         return true;
     }
 
     if (!driverdata->foreground_ready) {
-        if (startup_trace) {
-            SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO, "WiiU startup swap skip: frame=%d foreground not ready", trace_frame);
-        }
         return true;
     }
 
     tv_target = SDL_WIIU_GetScanTarget(driverdata, SDL_WIIU_DISPLAY_TV);
     drc_target = SDL_WIIU_GetScanTarget(driverdata, SDL_WIIU_DISPLAY_DRC);
     if ((!render_tv || !tv_target->scan_buffer) && (!render_drc || !drc_target->scan_buffer)) {
-        if (startup_trace) {
-            SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO,
-                        "WiiU startup swap skip: frame=%d no scan buffer tv_scan=%p drc_scan=%p",
-                        trace_frame,
-                        tv_target ? tv_target->scan_buffer : NULL,
-                        drc_target ? drc_target->scan_buffer : NULL);
-        }
         return true;
-    }
-
-    if (startup_trace) {
-        SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO,
-                    "WiiU startup swap targets: frame=%d tv_color=%p tv_image=%p tv_scan=%p drc_color=%p drc_image=%p drc_scan=%p",
-                    trace_frame,
-                    tv_target ? (void *)&tv_target->color_buffer : NULL,
-                    tv_target ? tv_target->color_buffer.surface.image : NULL,
-                    tv_target ? tv_target->scan_buffer : NULL,
-                    drc_target ? (void *)&drc_target->color_buffer : NULL,
-                    drc_target ? drc_target->color_buffer.surface.image : NULL,
-                    drc_target ? drc_target->scan_buffer : NULL);
     }
 
     GX2Flush();
     if (render_tv && tv_target->scan_buffer) {
         GX2CopyColorBufferToScanBuffer(&tv_target->color_buffer, GX2_SCAN_TARGET_TV);
-        if (startup_trace) {
-            SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO,
-                        "WiiU startup swap copy: frame=%d target=TV color=%p image=%p size=%ux%u",
-                        trace_frame,
-                        (void *)&tv_target->color_buffer,
-                        tv_target->color_buffer.surface.image,
-                        tv_target->color_buffer.surface.width,
-                        tv_target->color_buffer.surface.height);
-        }
         rendered_outputs |= SDL_WIIU_PRESENT_OUTPUT_TV;
     }
     if (mirror_drc_from_tv && tv_target->scan_buffer && drc_target->scan_buffer) {
         GX2CopyColorBufferToScanBuffer(&tv_target->color_buffer, GX2_SCAN_TARGET_DRC);
-        if (startup_trace) {
-            SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO,
-                        "WiiU startup swap copy: frame=%d target=DRC-from-TV color=%p image=%p",
-                        trace_frame,
-                        (void *)&tv_target->color_buffer,
-                        tv_target->color_buffer.surface.image);
-        }
         rendered_outputs |= SDL_WIIU_PRESENT_OUTPUT_DRC;
     } else if (render_drc && drc_target->scan_buffer) {
         GX2CopyColorBufferToScanBuffer(&drc_target->color_buffer, GX2_SCAN_TARGET_DRC);
-        if (startup_trace) {
-            SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO,
-                        "WiiU startup swap copy: frame=%d target=DRC color=%p image=%p size=%ux%u",
-                        trace_frame,
-                        (void *)&drc_target->color_buffer,
-                        drc_target->color_buffer.surface.image,
-                        drc_target->color_buffer.surface.width,
-                        drc_target->color_buffer.surface.height);
-        }
         rendered_outputs |= SDL_WIIU_PRESENT_OUTPUT_DRC;
     }
 
-    if (startup_trace) {
-        SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO,
-                    "WiiU startup swap rendered: frame=%d rendered=0x%x expected=0x%x pending=0x%x",
-                    trace_frame,
-                    (unsigned int)rendered_outputs,
-                    (unsigned int)SDL_WIIU_GetPresentOutputMask(_this),
-                    (unsigned int)driverdata->pending_present_mask);
-    }
-
     if (!SDL_WIIU_ShouldSwapPresent(_this, rendered_outputs)) {
-        if (startup_trace) {
-            SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO,
-                        "WiiU startup swap deferred: frame=%d rendered=0x%x pending=0x%x expected=0x%x",
-                        trace_frame,
-                        (unsigned int)rendered_outputs,
-                        (unsigned int)driverdata->pending_present_mask,
-                        (unsigned int)SDL_WIIU_GetPresentOutputMask(_this));
-        }
         return true;
     }
 
@@ -523,13 +434,6 @@ bool SDL_WIIU_GX2SwapWindow(SDL_VideoDevice *_this, SDL_Window *window)
     GX2DrawDone();
     GX2SetTVEnable(TRUE);
     GX2SetDRCEnable(driverdata->drc_connected ? TRUE : FALSE);
-    if (startup_trace) {
-        SDL_LogInfo(SDL_LOG_CATEGORY_VIDEO,
-                    "WiiU startup swap complete: frame=%d tv_enable=%d drc_enable=%d",
-                    trace_frame,
-                    1,
-                    driverdata->drc_connected ? 1 : 0);
-    }
     return true;
 }
 
