@@ -454,7 +454,7 @@ static void SDL_WIIU_PresentModalFrames(SDL_VideoData *driverdata,
     }
 
     GX2SwapScanBuffers();
-    GX2DrawDone();
+    GX2Flush();
     GX2SetTVEnable(TRUE);
     GX2SetDRCEnable(driverdata->drc_connected ? TRUE : FALSE);
 }

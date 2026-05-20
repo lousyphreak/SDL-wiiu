@@ -377,7 +377,6 @@ bool SDL_WIIU_UpdateWindowFramebuffer(SDL_VideoDevice *_this, SDL_Window *window
 
     GX2SwapScanBuffers();
     GX2Flush();
-    GX2DrawDone();
     GX2SetTVEnable(TRUE);
     GX2SetDRCEnable(driverdata->drc_connected ? TRUE : FALSE);
     return true;
@@ -431,7 +430,6 @@ bool SDL_WIIU_GX2SwapWindow(SDL_VideoDevice *_this, SDL_Window *window)
 
     GX2SwapScanBuffers();
     GX2Flush();
-    GX2DrawDone();
     GX2SetTVEnable(TRUE);
     GX2SetDRCEnable(driverdata->drc_connected ? TRUE : FALSE);
     return true;
