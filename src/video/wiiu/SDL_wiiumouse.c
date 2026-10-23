@@ -132,7 +132,6 @@ void SDL_WIIU_SuspendMouse(void)
     const Uint64 timestamp = SDL_GetTicksNS();
 
     SDL_WIIU_ResetMouseButtons(timestamp, SDL_WIIU_mouse_state.window);
-    SDL_SetMouseFocus(NULL);
 
     SDL_zero(SDL_WIIU_mouse_state);
     SDL_WIIU_mouse_state.active_channel = -1;
