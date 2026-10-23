@@ -3673,6 +3673,7 @@ elseif(WIIU)
       OUTPUT "${SDL_WIIU_RENDER_GSH}"
       COMMAND "${CMAKE_COMMAND}" -E make_directory "${SDL3_BINARY_DIR}/src/render/wiiu"
       COMMAND "${SDL_WIIU_SHADER_COMPILER}"
+              --uniform-mode block
               -vs "${SDL_WIIU_RENDER_VERTEX_SHADER}"
               -ps "${SDL_WIIU_RENDER_PIXEL_SHADER}"
               -o "${SDL_WIIU_RENDER_GSH}"
