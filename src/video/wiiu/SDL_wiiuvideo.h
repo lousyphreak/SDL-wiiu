@@ -121,6 +121,7 @@ struct SDL_WindowData
     SDL_WiiUDisplayKind display_kind;
     SDL_WiiUWindowRole role;
     int framebuffer_vsync;
+    SDL_WiiUExternalGraphics *external_graphics;
     GX2Texture framebuffer_texture;
     bool framebuffer_texture_ready;
 };

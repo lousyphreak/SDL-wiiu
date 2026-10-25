@@ -1335,6 +1335,9 @@ extern SDL_DECLSPEC SDL_Window * SDLCALL SDL_CreatePopupWindow(SDL_Window *paren
  *   with grabbed mouse focus
  * - `SDL_PROP_WINDOW_CREATE_OPENGL_BOOLEAN`: true if the window will be used
  *   with OpenGL rendering
+ * - `SDL_PROP_WINDOW_CREATE_WIIU_EXTERNAL_GRAPHICS_POINTER`: Wii U only, a
+ *   persistent SDL_WiiUExternalGraphics structure (SDL_wiiu.h) for an external
+ *   GX2 renderer. SDL retains scanout and foreground lifecycle management.
  * - `SDL_PROP_WINDOW_CREATE_PARENT_POINTER`: an SDL_Window that will be the
  *   parent of this window, required for windows with the "tooltip", "menu",
  *   and "modal" properties
@@ -1480,6 +1483,7 @@ extern SDL_DECLSPEC SDL_Window * SDLCALL SDL_CreateWindowWithProperties(SDL_Prop
 #define SDL_PROP_WINDOW_CREATE_MODAL_BOOLEAN                       "SDL.window.create.modal"
 #define SDL_PROP_WINDOW_CREATE_MOUSE_GRABBED_BOOLEAN               "SDL.window.create.mouse_grabbed"
 #define SDL_PROP_WINDOW_CREATE_OPENGL_BOOLEAN                      "SDL.window.create.opengl"
+#define SDL_PROP_WINDOW_CREATE_WIIU_EXTERNAL_GRAPHICS_POINTER       "SDL.window.create.wiiu.external_graphics"
 #define SDL_PROP_WINDOW_CREATE_PARENT_POINTER                      "SDL.window.create.parent"
 #define SDL_PROP_WINDOW_CREATE_RESIZABLE_BOOLEAN                   "SDL.window.create.resizable"
 #define SDL_PROP_WINDOW_CREATE_TITLE_STRING                        "SDL.window.create.title"
@@ -1647,6 +1651,9 @@ extern SDL_DECLSPEC SDL_Window * SDLCALL SDL_GetWindowParent(SDL_Window *window)
  *
  * On Wii U:
  *
+ * - `SDL_PROP_WINDOW_WIIU_MEM1_HEAP_POINTER`: foreground-only MEMHeapHandle
+ *   for external graphics allocations. Its lifetime is governed by the release
+ *   callback in SDL_WiiUExternalGraphics (SDL_wiiu.h).
  * - `SDL_PROP_WINDOW_WIIU_TV_COLOR_BUFFER_POINTER`: the `GX2ColorBuffer`
  *   associated with TV output for the window
  * - `SDL_PROP_WINDOW_WIIU_TV_CONTEXT_STATE_POINTER`: the `GX2ContextState`
@@ -1771,6 +1778,7 @@ extern SDL_DECLSPEC SDL_PropertiesID SDLCALL SDL_GetWindowProperties(SDL_Window 
 #define SDL_PROP_WINDOW_VIVANTE_DISPLAY_POINTER                     "SDL.window.vivante.display"
 #define SDL_PROP_WINDOW_VIVANTE_WINDOW_POINTER                      "SDL.window.vivante.window"
 #define SDL_PROP_WINDOW_VIVANTE_SURFACE_POINTER                     "SDL.window.vivante.surface"
+#define SDL_PROP_WINDOW_WIIU_MEM1_HEAP_POINTER                      "SDL.window.wiiu.mem1_heap"
 #define SDL_PROP_WINDOW_WIIU_TV_COLOR_BUFFER_POINTER                "SDL.window.wiiu.tv.color_buffer"
 #define SDL_PROP_WINDOW_WIIU_TV_CONTEXT_STATE_POINTER               "SDL.window.wiiu.tv.context_state"
 #define SDL_PROP_WINDOW_WIIU_DRC_COLOR_BUFFER_POINTER               "SDL.window.wiiu.drc.color_buffer"

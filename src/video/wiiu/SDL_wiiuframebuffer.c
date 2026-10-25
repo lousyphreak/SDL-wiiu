@@ -411,20 +411,28 @@ bool SDL_WIIU_GX2SwapWindow(SDL_VideoDevice *_this, SDL_Window *window)
         return true;
     }
 
+    const GX2ColorBuffer *color = windowdata->external_graphics ? windowdata->external_graphics->color : NULL;
+    if (windowdata->external_graphics && !color) {
+        return true;
+    }
     GX2Flush();
     if (render_tv && tv_target->scan_buffer) {
-        GX2CopyColorBufferToScanBuffer(&tv_target->color_buffer, GX2_SCAN_TARGET_TV);
+        GX2CopyColorBufferToScanBuffer(color ? color : &tv_target->color_buffer, GX2_SCAN_TARGET_TV);
         rendered_outputs |= SDL_WIIU_PRESENT_OUTPUT_TV;
     }
     if (mirror_drc_from_tv && tv_target->scan_buffer && drc_target->scan_buffer) {
-        GX2CopyColorBufferToScanBuffer(&tv_target->color_buffer, GX2_SCAN_TARGET_DRC);
+        GX2CopyColorBufferToScanBuffer(color ? color : &tv_target->color_buffer, GX2_SCAN_TARGET_DRC);
         rendered_outputs |= SDL_WIIU_PRESENT_OUTPUT_DRC;
     } else if (render_drc && drc_target->scan_buffer) {
-        GX2CopyColorBufferToScanBuffer(&drc_target->color_buffer, GX2_SCAN_TARGET_DRC);
+        GX2CopyColorBufferToScanBuffer(color ? color : &drc_target->color_buffer, GX2_SCAN_TARGET_DRC);
         rendered_outputs |= SDL_WIIU_PRESENT_OUTPUT_DRC;
     }
 
     if (!SDL_WIIU_ShouldSwapPresent(_this, rendered_outputs)) {
+        // The caller's color storage may retire before another window presents.
+        if (color) {
+            GX2Flush();
+        }
         return true;
     }
 

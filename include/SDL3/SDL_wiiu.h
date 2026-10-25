@@ -26,7 +26,10 @@
  *
  * Use SDL_GetWindowProperties() with the `SDL_PROP_WINDOW_WIIU_*` properties
  * from SDL_video.h to retrieve the current GX2 color buffers and context
- * states owned by SDL for a window. These handles can change whenever SDL
+ * states owned by SDL for a window. With external graphics enabled, the color
+ * descriptors describe the required layout but have no image allocation; the
+ * external renderer supplies its color buffer at presentation. These handles
+ * can change whenever SDL
  * rebuilds foreground-owned GX2 resources or reroutes TV/DRC output, so
  * applications should refresh cached handles when
  * `SDL_PROP_WINDOW_WIIU_FOREGROUND_GENERATION_NUMBER` changes.
@@ -42,6 +45,30 @@
 #ifdef __cplusplus
 extern "C" {
 #endif
+
+/**
+ * Optional external GX2 render storage, passed through
+ * SDL_PROP_WINDOW_CREATE_WIIU_EXTERNAL_GRAPHICS_POINTER. Do not combine this
+ * mode with SDL_Renderer or software window surfaces. Keep this structure
+ * alive until the window is destroyed. SDL still owns scan buffers and swapping.
+ *
+ * Set color before SDL_WIIU_SwapWindow(); native scan copying can resolve MSAA.
+ * SDL calls release on the main thread after draining GX2 and before destroying
+ * its MEM1 heap, including output-mode rebuilds and window destruction. The
+ * SDL_PROP_WINDOW_WIIU_MEM1_HEAP_POINTER property exposes that expansion heap.
+ * SDL places external graphics scan buffers in foreground memory to reserve
+ * MEM1 for render/depth/MSAA storage. Release
+ * all external allocations from that heap without issuing GX2 commands. Recreate
+ * them from current window properties after foreground acquisition. NULL color
+ * suppresses presentation while the external renderer has no target.
+ */
+struct GX2ColorBuffer;
+typedef struct SDL_WiiUExternalGraphics
+{
+    const struct GX2ColorBuffer *color;
+    void (SDLCALL *release)(void *userdata);
+    void *userdata;
+} SDL_WiiUExternalGraphics;
 
 typedef Uint32 SDL_WiiUPresentOutputFlags;
 

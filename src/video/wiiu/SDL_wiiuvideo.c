@@ -275,20 +275,20 @@ static void SDL_WIIU_UpdateWindowGX2Properties(SDL_VideoDevice *_this, SDL_Windo
         owns_drc_output = driverdata->drc_connected && (SDL_WIIU_GetOutputWindow(_this, SDL_WIIU_DISPLAY_DRC) == window);
         output_mask = SDL_WIIU_GetWindowPresentOutputMask(_this, window);
         if (owns_tv_output &&
-            driverdata->tv.color_buffer.surface.image &&
             driverdata->tv.context_state) {
             tv_color_buffer = &driverdata->tv.color_buffer;
             tv_context_state = driverdata->tv.context_state;
         }
         if (owns_drc_output &&
             !driverdata->drc_uses_tv_render_buffer &&
-            driverdata->drc.color_buffer.surface.image &&
             driverdata->drc.context_state) {
             drc_color_buffer = &driverdata->drc.color_buffer;
             drc_context_state = driverdata->drc.context_state;
         }
     }
 
+    SDL_SetPointerProperty(props, SDL_PROP_WINDOW_WIIU_MEM1_HEAP_POINTER,
+                           driverdata && driverdata->foreground_ready ? driverdata->mem1_heap : NULL);
     SDL_SetPointerProperty(props, SDL_PROP_WINDOW_WIIU_TV_COLOR_BUFFER_POINTER, tv_color_buffer);
     SDL_SetPointerProperty(props, SDL_PROP_WINDOW_WIIU_TV_CONTEXT_STATE_POINTER, tv_context_state);
     SDL_SetPointerProperty(props, SDL_PROP_WINDOW_WIIU_DRC_COLOR_BUFFER_POINTER, drc_color_buffer);
@@ -800,7 +800,11 @@ bool SDL_WIIU_UpdateOutputWindows(SDL_VideoDevice *_this)
         return false;
     }
 
+    const bool external_tv = tv_window && ((SDL_WindowData *)tv_window->internal)->external_graphics;
+    const bool external_drc = drc_window && ((SDL_WindowData *)drc_window->internal)->external_graphics;
     need_rebuild =
+        (driverdata->tv.context_state && (!!driverdata->tv.color_buffer.surface.image == external_tv)) ||
+        (!drc_uses_tv_render_buffer && driverdata->drc.context_state && (!!driverdata->drc.color_buffer.surface.image == external_drc)) ||
         driverdata->tv.render_width != tv_render_width ||
         driverdata->tv.render_height != tv_render_height ||
         driverdata->tv.scan_width != tv_scan_width ||
@@ -1103,7 +1107,12 @@ static bool SDL_WIIU_AllocateScanBuffer(SDL_VideoData *driverdata, SDL_WiiUScanT
         GX2CalcDRCSize(target->drc_render_mode, target->surface_format, GX2_BUFFERING_MODE_DOUBLE, &target->total_size, &unused_size);
     }
 
-    target->scan_buffer = SDL_WIIU_AllocForegroundMemory(driverdata, target->total_size, GX2_SCAN_BUFFER_ALIGNMENT, true, true);
+    // Scanout is sequential and read once. External graphics reserve MEM1 for
+    // repeatedly accessed render/depth/MSAA storage instead.
+    SDL_Window *window = SDL_WIIU_GetOutputWindow(SDL_WIIU_video_device, target->kind);
+    SDL_WindowData *windowdata = window ? window->internal : NULL;
+    const bool external = windowdata && windowdata->external_graphics;
+    target->scan_buffer = SDL_WIIU_AllocForegroundMemory(driverdata, target->total_size, GX2_SCAN_BUFFER_ALIGNMENT, !external, true);
     if (!target->scan_buffer) {
         SDL_SetError("Unable to allocate Wii U scan buffer");
         return false;
@@ -1135,14 +1144,16 @@ static bool SDL_WIIU_AllocateScanTargetRenderBuffer(SDL_VideoData *driverdata, S
     GX2CalcSurfaceSizeAndAlignment(color_surface);
     GX2InitColorBufferRegs(&target->color_buffer);
 
-    color_surface->image = SDL_WIIU_AllocForegroundMemory(driverdata, color_surface->imageSize, color_surface->alignment, true, true);
-    if (!color_surface->image) {
-        SDL_SetError("Unable to allocate Wii U color buffer");
-        return false;
+    SDL_Window *window = SDL_WIIU_GetOutputWindow(SDL_WIIU_video_device, target->kind);
+    SDL_WindowData *windowdata = window ? window->internal : NULL;
+    if (!windowdata || !windowdata->external_graphics) {
+        color_surface->image = SDL_WIIU_AllocForegroundMemory(driverdata, color_surface->imageSize, color_surface->alignment, true, true);
+        if (!color_surface->image) {
+            return SDL_SetError("Unable to allocate Wii U color buffer");
+        }
+        SDL_memset(color_surface->image, 0, color_surface->imageSize);
+        GX2Invalidate((GX2InvalidateMode)(GX2_INVALIDATE_MODE_CPU | GX2_INVALIDATE_MODE_COLOR_BUFFER), color_surface->image, color_surface->imageSize);
     }
-
-    SDL_memset(color_surface->image, 0, color_surface->imageSize);
-    GX2Invalidate((GX2InvalidateMode)(GX2_INVALIDATE_MODE_CPU | GX2_INVALIDATE_MODE_COLOR_BUFFER), color_surface->image, color_surface->imageSize);
 
     target->context_state = MEMAllocFromDefaultHeapEx(sizeof(*target->context_state), GX2_CONTEXT_STATE_ALIGNMENT);
     if (!target->context_state) {
@@ -1150,7 +1161,9 @@ static bool SDL_WIIU_AllocateScanTargetRenderBuffer(SDL_VideoData *driverdata, S
     }
     GX2SetupContextStateEx(target->context_state, TRUE);
     GX2SetContextState(target->context_state);
-    GX2SetColorBuffer(&target->color_buffer, GX2_RENDER_TARGET_0);
+    if (color_surface->image) {
+        GX2SetColorBuffer(&target->color_buffer, GX2_RENDER_TARGET_0);
+    }
     GX2SetViewport(0.0f, 0.0f, (float)target->render_width, (float)target->render_height, 0.0f, 1.0f);
     GX2SetScissor(0, 0, target->render_width, target->render_height);
 
@@ -1165,6 +1178,14 @@ static void SDL_WIIU_ReleaseForegroundRenderers(SDL_VideoDevice *_this, SDL_Vide
     for (window = _this->windows; window; window = window->next) {
         int i;
 
+        SDL_WindowData *windowdata = window->internal;
+        if (windowdata && windowdata->external_graphics) {
+            SDL_WiiUExternalGraphics *graphics = windowdata->external_graphics;
+            if (graphics->release) {
+                graphics->release(graphics->userdata);
+            }
+            graphics->color = NULL;
+        }
         for (i = 0; i < window->num_renderers; ++i) {
             SDL_WIIU_ReleaseForegroundRendererResources(window->renderers[i], driverdata->mem1_heap, driverdata->foreground_heap);
         }
@@ -1556,6 +1577,7 @@ static bool SDL_WIIU_CreateWindow(SDL_VideoDevice *_this, SDL_Window *window, SD
     windowdata->display_kind = displaydata->kind;
     windowdata->role = SDL_WIIU_WINDOW_ROLE_SHARED;
     windowdata->framebuffer_vsync = 1;
+    windowdata->external_graphics = SDL_GetPointerProperty(create_props, SDL_PROP_WINDOW_CREATE_WIIU_EXTERNAL_GRAPHICS_POINTER, NULL);
     window->internal = windowdata;
     window->displayID = target_display_id;
 
@@ -1592,6 +1614,12 @@ static bool SDL_WIIU_CreateWindow(SDL_VideoDevice *_this, SDL_Window *window, SD
 static void SDL_WIIU_DestroyWindow(SDL_VideoDevice *_this, SDL_Window *window)
 {
     if (window && window->internal) {
+        SDL_WindowData *windowdata = window->internal;
+        if (windowdata->external_graphics && windowdata->external_graphics->release) {
+            GX2DrawDone();
+            windowdata->external_graphics->release(windowdata->external_graphics->userdata);
+            windowdata->external_graphics->color = NULL;
+        }
         SDL_free(window->internal);
         window->internal = NULL;
     }
