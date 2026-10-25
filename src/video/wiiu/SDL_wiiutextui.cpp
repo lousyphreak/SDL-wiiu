@@ -442,12 +442,18 @@ static void SDL_WIIU_PresentModalFrames(SDL_VideoData *driverdata,
     }
 
     if (driverdata->tv.scan_buffer) {
+        if (!SDL_WIIU_EnsureNativeUIRenderBuffer(driverdata, &driverdata->tv)) {
+            return;
+        }
         SDL_WIIU_PrepareScanTarget(&driverdata->tv);
         draw_tv();
         GX2CopyColorBufferToScanBuffer(&driverdata->tv.color_buffer, GX2_SCAN_TARGET_TV);
     }
 
     if (driverdata->drc_connected && driverdata->drc.scan_buffer) {
+        if (!SDL_WIIU_EnsureNativeUIRenderBuffer(driverdata, &driverdata->drc)) {
+            return;
+        }
         SDL_WIIU_PrepareScanTarget(&driverdata->drc);
         draw_drc();
         GX2CopyColorBufferToScanBuffer(&driverdata->drc.color_buffer, GX2_SCAN_TARGET_DRC);

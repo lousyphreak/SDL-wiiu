@@ -803,8 +803,8 @@ bool SDL_WIIU_UpdateOutputWindows(SDL_VideoDevice *_this)
     const bool external_tv = tv_window && ((SDL_WindowData *)tv_window->internal)->external_graphics;
     const bool external_drc = drc_window && ((SDL_WindowData *)drc_window->internal)->external_graphics;
     need_rebuild =
-        (driverdata->tv.context_state && (!!driverdata->tv.color_buffer.surface.image == external_tv)) ||
-        (!drc_uses_tv_render_buffer && driverdata->drc.context_state && (!!driverdata->drc.color_buffer.surface.image == external_drc)) ||
+        (driverdata->tv.context_state && (driverdata->tv.external_graphics != external_tv)) ||
+        (!drc_uses_tv_render_buffer && driverdata->drc.context_state && (driverdata->drc.external_graphics != external_drc)) ||
         driverdata->tv.render_width != tv_render_width ||
         driverdata->tv.render_height != tv_render_height ||
         driverdata->tv.scan_width != tv_scan_width ||
@@ -1112,6 +1112,7 @@ static bool SDL_WIIU_AllocateScanBuffer(SDL_VideoData *driverdata, SDL_WiiUScanT
     SDL_Window *window = SDL_WIIU_GetOutputWindow(SDL_WIIU_video_device, target->kind);
     SDL_WindowData *windowdata = window ? window->internal : NULL;
     const bool external = windowdata && windowdata->external_graphics;
+    target->external_graphics = external;
     target->scan_buffer = SDL_WIIU_AllocForegroundMemory(driverdata, target->total_size, GX2_SCAN_BUFFER_ALIGNMENT, !external, true);
     if (!target->scan_buffer) {
         SDL_SetError("Unable to allocate Wii U scan buffer");
@@ -1127,9 +1128,16 @@ static bool SDL_WIIU_AllocateScanBuffer(SDL_VideoData *driverdata, SDL_WiiUScanT
     return true;
 }
 
-static bool SDL_WIIU_AllocateScanTargetRenderBuffer(SDL_VideoData *driverdata, SDL_WiiUScanTarget *target)
+static bool SDL_WIIU_ConfigureScanTargetRenderBuffer(SDL_VideoData *driverdata, SDL_WiiUScanTarget *target, bool layout_only)
 {
     GX2Surface *color_surface = &target->color_buffer.surface;
+
+    SDL_Window *window = SDL_WIIU_GetOutputWindow(SDL_WIIU_video_device, target->kind);
+    SDL_WindowData *windowdata = window ? window->internal : NULL;
+    const bool external = windowdata && windowdata->external_graphics;
+    if (target->context_state && (color_surface->image || (layout_only && external))) {
+        return true;
+    }
 
     color_surface->use = GX2_SURFACE_USE_TEXTURE_COLOR_BUFFER_TV;
     color_surface->dim = GX2_SURFACE_DIM_TEXTURE_2D;
@@ -1144,10 +1152,8 @@ static bool SDL_WIIU_AllocateScanTargetRenderBuffer(SDL_VideoData *driverdata, S
     GX2CalcSurfaceSizeAndAlignment(color_surface);
     GX2InitColorBufferRegs(&target->color_buffer);
 
-    SDL_Window *window = SDL_WIIU_GetOutputWindow(SDL_WIIU_video_device, target->kind);
-    SDL_WindowData *windowdata = window ? window->internal : NULL;
-    if (!windowdata || !windowdata->external_graphics) {
-        color_surface->image = SDL_WIIU_AllocForegroundMemory(driverdata, color_surface->imageSize, color_surface->alignment, true, true);
+    if (!layout_only || !external) {
+        color_surface->image = SDL_WIIU_AllocForegroundMemory(driverdata, color_surface->imageSize, color_surface->alignment, !external, true);
         if (!color_surface->image) {
             return SDL_SetError("Unable to allocate Wii U color buffer");
         }
@@ -1155,11 +1161,13 @@ static bool SDL_WIIU_AllocateScanTargetRenderBuffer(SDL_VideoData *driverdata, S
         GX2Invalidate((GX2InvalidateMode)(GX2_INVALIDATE_MODE_CPU | GX2_INVALIDATE_MODE_COLOR_BUFFER), color_surface->image, color_surface->imageSize);
     }
 
-    target->context_state = MEMAllocFromDefaultHeapEx(sizeof(*target->context_state), GX2_CONTEXT_STATE_ALIGNMENT);
     if (!target->context_state) {
-        return SDL_SetError("Unable to allocate Wii U GX2 context state");
+        target->context_state = MEMAllocFromDefaultHeapEx(sizeof(*target->context_state), GX2_CONTEXT_STATE_ALIGNMENT);
+        if (!target->context_state) {
+            return SDL_SetError("Unable to allocate Wii U GX2 context state");
+        }
+        GX2SetupContextStateEx(target->context_state, TRUE);
     }
-    GX2SetupContextStateEx(target->context_state, TRUE);
     GX2SetContextState(target->context_state);
     if (color_surface->image) {
         GX2SetColorBuffer(&target->color_buffer, GX2_RENDER_TARGET_0);
@@ -1169,6 +1177,18 @@ static bool SDL_WIIU_AllocateScanTargetRenderBuffer(SDL_VideoData *driverdata, S
 
     SDL_WIIU_BindScanTarget(target);
     return true;
+}
+
+static bool SDL_WIIU_AllocateScanTargetRenderBuffer(SDL_VideoData *driverdata, SDL_WiiUScanTarget *target)
+{
+    return SDL_WIIU_ConfigureScanTargetRenderBuffer(driverdata, target, true);
+}
+
+bool SDL_WIIU_EnsureNativeUIRenderBuffer(SDL_VideoData *driverdata, SDL_WiiUScanTarget *target)
+{
+    // Native UI uses its own single-sample image. External graphics retain MEM1;
+    // the lazily allocated dialog image lives in the existing foreground heap.
+    return SDL_WIIU_ConfigureScanTargetRenderBuffer(driverdata, target, false);
 }
 
 static void SDL_WIIU_ReleaseForegroundRenderers(SDL_VideoDevice *_this, SDL_VideoData *driverdata)

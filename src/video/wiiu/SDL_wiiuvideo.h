@@ -79,6 +79,7 @@ typedef struct SDL_WiiUScanTarget
     GX2DrcRenderMode drc_render_mode;
     void *scan_buffer;
     uint32_t total_size;
+    bool external_graphics; // Scan allocation policy; a modal may also allocate a render image.
     GX2ColorBuffer color_buffer;
     GX2ContextState *context_state;
 } SDL_WiiUScanTarget;
@@ -139,6 +140,7 @@ extern void SDL_WIIU_PumpEvents(SDL_VideoDevice *_this);
 
 extern SDL_Window *SDL_WIIU_GetOutputWindow(SDL_VideoDevice *_this, SDL_WiiUDisplayKind kind);
 extern bool SDL_WIIU_UpdateOutputWindows(SDL_VideoDevice *_this);
+extern bool SDL_WIIU_EnsureNativeUIRenderBuffer(SDL_VideoData *driverdata, SDL_WiiUScanTarget *target);
 extern void SDL_WIIU_GetPresentationRect(int src_w, int src_h, int dst_w, int dst_h, SDL_Rect *rect);
 extern void SDL_WIIU_GetWindowPresentationSize(SDL_VideoDevice *_this, SDL_Window *window, int *w, int *h);
 extern Uint32 SDL_WIIU_GetPresentOutputMask(SDL_VideoDevice *_this);
