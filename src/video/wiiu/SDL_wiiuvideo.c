@@ -1553,7 +1553,8 @@ static bool SDL_WIIU_SetDisplayMode(SDL_VideoDevice *_this, SDL_VideoDisplay *di
     }
 
     window = SDL_WIIU_GetWindowForDisplay(_this, display->id);
-    if (window) {
+    // Restoring the desktop for HOME must preserve the minimized window's mode.
+    if (window && !(window->flags & SDL_WINDOW_MINIMIZED)) {
         SDL_WIIU_SetWindowSizeInternal(window, target_w, target_h);
         window->surface_valid = false;
     }
