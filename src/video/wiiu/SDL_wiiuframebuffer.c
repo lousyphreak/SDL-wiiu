@@ -263,6 +263,10 @@ static void SDL_WIIU_RenderWindowToTarget(SDL_VideoData *driverdata, SDL_Window 
 
 bool SDL_WIIU_CreateWindowFramebuffer(SDL_VideoDevice *_this, SDL_Window *window, SDL_PixelFormat *format, void **pixels, int *pitch)
 {
+    if (((SDL_VideoData *)_this->internal)->external_owner) {
+        return SDL_SetError("Graphics are owned by an external renderer");
+    }
+
     SDL_Surface *framebuffer;
     SDL_VideoDisplay *display = SDL_GetVideoDisplay(SDL_GetDisplayForWindow(window));
     int width;

@@ -92,6 +92,7 @@ struct SDL_VideoData
     MEMHeapHandle foreground_heap;
     MEMHeapHandle mem1_heap;
     bool gx2_initialized;
+    bool external_owner;
     bool foreground_ready;
     bool vpad_initialized;
     bool keyboard_initialized;

@@ -674,8 +674,7 @@ static bool SDL_WIIU_RunMessageBox(SDL_VideoDevice *_this, const SDL_MessageBoxD
 
 extern "C" bool SDL_WIIU_HasScreenKeyboardSupport(SDL_VideoDevice *_this)
 {
-    (void)_this;
-    return true;
+    return !static_cast<SDL_VideoData *>(_this->internal)->external_owner;
 }
 
 extern "C" bool SDL_WIIU_ShowTextInput(SDL_VideoDevice *_this, SDL_PropertiesID props)
@@ -693,6 +692,9 @@ extern "C" bool SDL_WIIU_ShowMessageBox(SDL_VideoDevice *_this, const SDL_Messag
         return SDL_InvalidParamError("messageboxdata");
     }
 
+    if (static_cast<SDL_VideoData *>(_this->internal)->external_owner) {
+        return SDL_SetError("Graphics are owned by an external renderer");
+    }
     return SDL_WIIU_RunMessageBox(_this, messageboxdata, buttonID);
 }
 

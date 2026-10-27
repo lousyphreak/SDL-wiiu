@@ -4614,6 +4614,15 @@ extern "C" {
 #define SDL_HINT_WAVE_TRUNCATION "SDL_WAVE_TRUNCATION"
 
 /**
+ * Select process-wide external graphics ownership before video initialization.
+ * On Wii U, "1" leaves GX2 initialization, all graphics resources and presentation
+ * to the external renderer. SDL still provides displays, windows, input and
+ * lifecycle events. SDL rendering is unavailable in this mode. Other backends
+ * may ignore this hint.
+ */
+#define SDL_HINT_VIDEO_EXTERNAL_GRAPHICS "SDL_VIDEO_EXTERNAL_GRAPHICS"
+
+/**
  * A variable controlling how many region buffers SDL allocates per Wii U file.
  *
  * Each open Wii U file stream gets its own region cache. Regions are fixed-size

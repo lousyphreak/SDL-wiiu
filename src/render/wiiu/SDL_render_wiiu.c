@@ -1967,6 +1967,10 @@ static bool WIIU_SetVSync(SDL_Renderer *renderer, const int vsync)
 
 static bool WIIU_CreateRenderer(SDL_Renderer *renderer, SDL_Window *window, SDL_PropertiesID create_props)
 {
+    if (((SDL_VideoData *)SDL_GetVideoDevice()->internal)->external_owner) {
+        return SDL_SetError("Graphics are owned by an external renderer");
+    }
+
     WIIU_RenderData *data = (WIIU_RenderData *)SDL_calloc(1, sizeof(*data));
     int32_t sampler_location;
 
