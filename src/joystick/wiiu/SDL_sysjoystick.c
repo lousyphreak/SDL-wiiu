@@ -956,9 +956,9 @@ static void SDL_WIIU_UpdateDRC(SDL_Joystick *joystick, joystick_hwdata *hwdata)
 
     if (valid) {
         SDL_WIIU_SendSensorData(joystick, hwdata, timestamp, SDL_SENSOR_ACCEL,
-                                state->status.accelorometer.acc.x,
-                                state->status.accelorometer.acc.y,
-                                state->status.accelorometer.acc.z,
+                                state->status.accelerometer.acc.x,
+                                state->status.accelerometer.acc.y,
+                                state->status.accelerometer.acc.z,
                                 SDL_STANDARD_GRAVITY);
         SDL_WIIU_SendSensorData(joystick, hwdata, timestamp, SDL_SENSOR_GYRO,
                                 state->status.gyro.x,

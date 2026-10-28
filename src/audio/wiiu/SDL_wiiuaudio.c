@@ -473,7 +473,7 @@ static bool WIIUAUDIO_OpenRecordingDevice(SDL_AudioDevice *device)
     DCFlushRange(device->hidden->mic_sample_buffer, device->hidden->mic_sample_count * sizeof(Sint16));
 
     SDL_zero(device->hidden->mic_resource);
-    device->hidden->mic_ring.sampleMaxCount = device->hidden->mic_sample_count;
+    device->hidden->mic_ring.sampleCapacity = device->hidden->mic_sample_count;
     device->hidden->mic_ring.sampleBuffer = device->hidden->mic_sample_buffer;
 
     device->hidden->mic_handle = MICInit(MIC_INSTANCE_0,
@@ -595,7 +595,7 @@ static bool WIIUAUDIO_WaitRecordingDevice(SDL_AudioDevice *device)
             return SDL_SetError("MICGetStatus failed while waiting for samples");
         }
 
-        if (status.availableData > 0) {
+        if (status.availableSamples > 0) {
             return true;
         }
 
@@ -620,7 +620,7 @@ static int WIIUAUDIO_RecordDevice(SDL_AudioDevice *device, void *buffer, int buf
         return -1;
     }
 
-    available_samples = status.availableData;
+    available_samples = status.availableSamples;
     if (available_samples <= 0) {
         return 0;
     }
@@ -629,9 +629,9 @@ static int WIIUAUDIO_RecordDevice(SDL_AudioDevice *device, void *buffer, int buf
     DCInvalidateRange(device->hidden->mic_sample_buffer,
                       device->hidden->mic_sample_count * sizeof(Sint16));
 
-    first_chunk = SDL_min(copy_samples, (int)device->hidden->mic_sample_count - status.bufferPos);
+    first_chunk = SDL_min(copy_samples, (int)device->hidden->mic_sample_count - (int)status.readIndex);
     SDL_memcpy(dst,
-               device->hidden->mic_sample_buffer + status.bufferPos,
+               device->hidden->mic_sample_buffer + status.readIndex,
                first_chunk * sizeof(Sint16));
 
     if (first_chunk < copy_samples) {
@@ -652,8 +652,8 @@ static void WIIUAUDIO_FlushRecording(SDL_AudioDevice *device)
 {
     MICStatus status;
 
-    if (MICGetStatus(device->hidden->mic_handle, &status) == MIC_ERROR_OK && status.availableData > 0) {
-        MICSetDataConsumed(device->hidden->mic_handle, status.availableData);
+    if (MICGetStatus(device->hidden->mic_handle, &status) == MIC_ERROR_OK && status.availableSamples > 0) {
+        MICSetDataConsumed(device->hidden->mic_handle, status.availableSamples);
     }
 }
 
