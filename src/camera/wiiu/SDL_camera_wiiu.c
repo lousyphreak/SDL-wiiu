@@ -89,12 +89,12 @@ static bool WIIUCAMERA_SetError(const char *operation, CAMError err)
     return SDL_SetError("%s failed: %s (%d)", operation, WIIUCAMERA_GetErrorString(err), err);
 }
 
-static bool WIIUCAMERA_FindDeviceByToken(SDL_Camera *device, void *userdata)
+static bool WIIUCAMERA_FindDeviceByToken(void *userdata, SDL_Camera *device)
 {
     return device->handle == userdata;
 }
 
-static bool WIIUCAMERA_FindDeviceByHandle(SDL_Camera *device, void *userdata)
+static bool WIIUCAMERA_FindDeviceByHandle(void *userdata, SDL_Camera *device)
 {
     const struct SDL_PrivateCameraData *hidden = device->hidden;
     return hidden && hidden->camera_initialized && ((uintptr_t)hidden->handle == (uintptr_t)userdata);
@@ -128,7 +128,7 @@ static void WIIUCAMERA_ResetSurfaceStates(struct SDL_PrivateCameraData *hidden, 
     }
 }
 
-static bool WIIUCAMERA_HasQueuedCompletion(const struct SDL_PrivateCameraData *hidden)
+static bool WIIUCAMERA_HasQueuedCompletion(struct SDL_PrivateCameraData *hidden)
 {
     return SDL_GetAtomicInt(&hidden->queue_read) != SDL_GetAtomicInt(&hidden->queue_write);
 }

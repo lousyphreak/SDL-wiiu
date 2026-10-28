@@ -683,9 +683,9 @@ static void WIIUAUDIO_CloseDevice(SDL_AudioDevice *device)
 
 static void WIIUAUDIO_DetectDevices(SDL_AudioDevice **default_playback, SDL_AudioDevice **default_recording)
 {
-    *default_playback = SDL_AddAudioDevice(false, WIIUAUDIO_PLAYBACK_NAME, NULL, (void *)((size_t)0x1));
+    *default_playback = SDL_AddAudioDevice(false, WIIUAUDIO_PLAYBACK_NAME, NULL, NULL, (void *)((size_t)0x1));
 
-    *default_recording = SDL_AddAudioDevice(true, WIIUAUDIO_RECORDING_NAME, NULL, (void *)((size_t)0x2));
+    *default_recording = SDL_AddAudioDevice(true, WIIUAUDIO_RECORDING_NAME, NULL, NULL, (void *)((size_t)0x2));
 }
 
 static bool WIIUAUDIO_Init(SDL_AudioDriverImpl *impl)

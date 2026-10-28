@@ -30,6 +30,11 @@ char *SDL_SYS_GetBasePath(void)
     return SDL_WIIU_GetBasePath();
 }
 
+char *SDL_SYS_GetExeName(void)
+{
+    return NULL; // Title launches do not provide a general executable filename.
+}
+
 char *SDL_SYS_GetPrefPath(const char *org, const char *app)
 {
     return SDL_WIIU_GetPrefPath(org, app);

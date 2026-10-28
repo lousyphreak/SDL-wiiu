@@ -370,7 +370,7 @@ static bool WIIU_IO_IsRegionLoading(SDL_WiiUIOData *data, Uint64 region)
     int i;
 
     for (i = 0; i < data->num_slots; ++i) {
-        const SDL_WiiUIORegionSlot *slot = &data->slots[i];
+        SDL_WiiUIORegionSlot *slot = &data->slots[i];
         if ((SDL_GetAtomicInt(&slot->state) == WIIU_IO_REGION_LOADING) &&
             (slot->generation == generation) &&
             (slot->region == region)) {
