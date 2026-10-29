@@ -29,7 +29,6 @@
 #include <stdint.h>
 #include <coreinit/filesystem.h>
 
-#define SDL_WIIU_ASYNCIO_ALIGNMENT 64
 #define SDL_WIIU_ASYNCIO_ERROR_MASK FS_ERROR_FLAG_ALL
 
 extern void FSCancelCommand(FSClient *client, FSCmdBlock *block);
@@ -64,6 +63,8 @@ typedef struct SDL_WiiUAsyncIOTaskData
     FSAsyncData async_data;
     Uint8 *bounce_buffer;
     Uint8 *io_buffer;
+    size_t chunk_size;
+    bool cancelled;
     FSStatus staged_result;
     SDL_WiiUAsyncIOStage stage;
 } SDL_WiiUAsyncIOTaskData;
@@ -88,17 +89,6 @@ static bool WIIU_InitializeAsyncIO(void)
     return true;
 }
 
-static size_t WIIU_GetAlignedBufferSize(Uint64 requested)
-{
-    size_t size = (size_t) SDL_max(requested, 1);
-    return (size + (SDL_WIIU_ASYNCIO_ALIGNMENT - 1)) & ~(SDL_WIIU_ASYNCIO_ALIGNMENT - 1);
-}
-
-static bool WIIU_AsyncIOTaskNeedsBounceBuffer(const void *buffer)
-{
-    return ((((uintptr_t) buffer) & (SDL_WIIU_ASYNCIO_ALIGNMENT - 1)) != 0);
-}
-
 static void WIIU_DestroyAsyncTaskData(SDL_WiiUAsyncIOTaskData *taskdata)
 {
     if (!taskdata) {
@@ -111,39 +101,78 @@ static void WIIU_DestroyAsyncTaskData(SDL_WiiUAsyncIOTaskData *taskdata)
     SDL_free(taskdata);
 }
 
+static bool WIIU_PrepareIOTaskBuffer(SDL_WiiUAsyncIOTaskData *taskdata)
+{
+    SDL_AsyncIOTask *task = taskdata->task;
+    Uint8 *buffer = (Uint8 *) task->buffer + (size_t) task->result_size;
+
+    taskdata->chunk_size = SDL_WIIU_GetTransferSize(buffer, (size_t) (task->requested_size - task->result_size));
+    if ((((uintptr_t) buffer | taskdata->chunk_size) & (SDL_WIIU_IO_ALIGNMENT - 1)) == 0) {
+        taskdata->io_buffer = buffer;
+        return true;
+    }
+
+    if (!taskdata->bounce_buffer) {
+        const size_t capacity = (taskdata->chunk_size + SDL_WIIU_IO_ALIGNMENT - 1) & ~(SDL_WIIU_IO_ALIGNMENT - 1);
+        taskdata->bounce_buffer = (Uint8 *) SDL_aligned_alloc(SDL_WIIU_IO_ALIGNMENT, capacity);
+        if (!taskdata->bounce_buffer) {
+            return false;
+        }
+    }
+    if (task->type == SDL_ASYNCIO_TASK_WRITE) {
+        SDL_memcpy(taskdata->bounce_buffer, buffer, taskdata->chunk_size);
+    }
+    taskdata->io_buffer = taskdata->bounce_buffer;
+    return true;
+}
+
+// Called with the file lock held, including when continuing an unaligned request.
+static FSStatus WIIU_SubmitIOTask(SDL_WiiUAsyncIOTaskData *taskdata)
+{
+    SDL_AsyncIOTask *task = taskdata->task;
+    SDL_WiiUAsyncIOData *filedata = taskdata->filedata;
+    const Uint64 offset = task->offset + task->result_size;
+
+    if (offset > UINT32_MAX) {
+        return FS_STATUS_FILE_TOO_BIG;
+    }
+
+    FSInitCmdBlock(&taskdata->cmd_block);
+    // size=1 makes the native element count a byte count. FS handles device batching.
+    if (task->type == SDL_ASYNCIO_TASK_READ) {
+        return FSReadFileWithPosAsync(&filedata->client, &taskdata->cmd_block,
+                                     taskdata->io_buffer, 1, (uint32_t) taskdata->chunk_size,
+                                     (uint32_t) offset, filedata->handle, 0,
+                                     SDL_WIIU_ASYNCIO_ERROR_MASK, &taskdata->async_data);
+    }
+    return FSWriteFileWithPosAsync(&filedata->client, &taskdata->cmd_block,
+                                  taskdata->io_buffer, 1, (uint32_t) taskdata->chunk_size,
+                                  (uint32_t) offset, filedata->handle, 0,
+                                  SDL_WIIU_ASYNCIO_ERROR_MASK, &taskdata->async_data);
+}
+
+// Releases the file lock before publishing completion: consuming a close may destroy it.
 static void WIIU_FinalizeAsyncTask(SDL_WiiUAsyncIOTaskData *taskdata, FSStatus result)
 {
     SDL_AsyncIOTask *task = taskdata->task;
+    SDL_Mutex *lock = taskdata->filedata->lock;
 
-    if (task->type == SDL_ASYNCIO_TASK_CLOSE) {
-        const FSStatus effective = (taskdata->staged_result != FS_STATUS_OK) ? taskdata->staged_result : result;
-        if (effective == FS_STATUS_OK) {
-            task->result = SDL_ASYNCIO_COMPLETE;
-        } else if (effective == FS_STATUS_CANCELLED) {
-            task->result = SDL_ASYNCIO_CANCELED;
-        } else {
-            task->result = SDL_ASYNCIO_FAILURE;
-        }
-    } else if ((task->type == SDL_ASYNCIO_TASK_READ) && (result == FS_STATUS_END)) {
-        task->result_size = 0;
+    if (task->type == SDL_ASYNCIO_TASK_CLOSE && taskdata->staged_result != FS_STATUS_OK) {
+        result = taskdata->staged_result;
+    }
+    if (result == FS_STATUS_CANCELLED) {
+        task->result = SDL_ASYNCIO_CANCELED;
+    } else if (task->type == SDL_ASYNCIO_TASK_READ && result == FS_STATUS_END) {
         task->result = SDL_ASYNCIO_COMPLETE;
     } else if (result >= 0) {
-        task->result_size = (Uint64) result;
-        if (task->type == SDL_ASYNCIO_TASK_READ) {
-            if (taskdata->bounce_buffer && task->result_size > 0) {
-                SDL_memcpy(task->buffer, taskdata->bounce_buffer, (size_t) task->result_size);
-            }
-            task->result = SDL_ASYNCIO_COMPLETE;
-        } else {
-            task->result = (task->result_size == task->requested_size) ? SDL_ASYNCIO_COMPLETE : SDL_ASYNCIO_FAILURE;
-        }
-    } else if (result == FS_STATUS_CANCELLED) {
-        task->result = SDL_ASYNCIO_CANCELED;
+        task->result = (task->type != SDL_ASYNCIO_TASK_WRITE || task->result_size == task->requested_size)
+                           ? SDL_ASYNCIO_COMPLETE : SDL_ASYNCIO_FAILURE;
     } else {
         task->result = SDL_ASYNCIO_FAILURE;
     }
 
     WIIU_DestroyAsyncTaskData(taskdata);
+    SDL_UnlockMutex(lock);
     WIIU_AsyncIOComplete(task);
 }
 
@@ -155,6 +184,7 @@ static void WIIU_AsyncIOCallback(FSClient *client, FSCmdBlock *block, FSStatus r
     (void) client;
     (void) block;
 
+    SDL_LockMutex(filedata->lock);
     if ((task->type == SDL_ASYNCIO_TASK_CLOSE) && (taskdata->stage == SDL_WIIU_ASYNCIO_STAGE_FLUSH)) {
         FSStatus issue_status;
 
@@ -163,50 +193,43 @@ static void WIIU_AsyncIOCallback(FSClient *client, FSCmdBlock *block, FSStatus r
         }
 
         taskdata->stage = SDL_WIIU_ASYNCIO_STAGE_CLOSE;
-        SDL_LockMutex(filedata->lock);
         issue_status = FSCloseFileAsync(&filedata->client,
                                         &taskdata->cmd_block,
                                         filedata->handle,
                                         SDL_WIIU_ASYNCIO_ERROR_MASK,
                                         &taskdata->async_data);
-        SDL_UnlockMutex(filedata->lock);
         if (issue_status == FS_STATUS_OK) {
+            SDL_UnlockMutex(filedata->lock);
             return;
-        }
-
-        if (taskdata->staged_result == FS_STATUS_OK) {
-            taskdata->staged_result = issue_status;
         }
         WIIU_FinalizeAsyncTask(taskdata, issue_status);
         return;
     }
 
+    if (task->type != SDL_ASYNCIO_TASK_CLOSE) {
+        if (result >= 0) {
+            if (task->type == SDL_ASYNCIO_TASK_READ && taskdata->io_buffer == taskdata->bounce_buffer) {
+                SDL_memcpy((Uint8 *) task->buffer + (size_t) task->result_size, taskdata->io_buffer, (size_t) result);
+            }
+            task->result_size += (Uint64) result;
+        }
+
+        if (taskdata->cancelled) {
+            result = FS_STATUS_CANCELLED;
+        } else if (result >= 0 && (size_t) result == taskdata->chunk_size && task->result_size < task->requested_size) {
+            if (!WIIU_PrepareIOTaskBuffer(taskdata)) {
+                result = FS_STATUS_MEDIA_ERROR;
+            } else {
+                result = WIIU_SubmitIOTask(taskdata);
+                if (result == FS_STATUS_OK) {
+                    SDL_UnlockMutex(filedata->lock);
+                    return;
+                }
+            }
+        }
+    }
+
     WIIU_FinalizeAsyncTask(taskdata, result);
-}
-
-static bool WIIU_PrepareIOTaskBuffer(SDL_WiiUAsyncIOTaskData *taskdata, bool writing)
-{
-    SDL_AsyncIOTask *task = taskdata->task;
-
-    if (task->requested_size > SDL_SIZE_MAX) {
-        return SDL_SetError("Wii U async I/O task exceeds SDL_SIZE_MAX");
-    }
-
-    if (!WIIU_AsyncIOTaskNeedsBounceBuffer(task->buffer)) {
-        taskdata->io_buffer = (Uint8 *) task->buffer;
-        return true;
-    }
-
-    taskdata->bounce_buffer = (Uint8 *) SDL_aligned_alloc(SDL_WIIU_ASYNCIO_ALIGNMENT, WIIU_GetAlignedBufferSize(task->requested_size));
-    if (!taskdata->bounce_buffer) {
-        return false;
-    }
-
-    if (writing && task->requested_size > 0) {
-        SDL_memcpy(taskdata->bounce_buffer, task->buffer, (size_t) task->requested_size);
-    }
-    taskdata->io_buffer = taskdata->bounce_buffer;
-    return true;
 }
 
 static SDL_WiiUAsyncIOTaskData *WIIU_CreateAsyncTaskData(SDL_AsyncIOTask *task)
@@ -242,70 +265,26 @@ static bool WIIU_QueueImmediateTask(SDL_AsyncIOTask *task)
     return true;
 }
 
-static bool WIIU_IssueReadTask(SDL_WiiUAsyncIOTaskData *taskdata)
+static bool WIIU_IssueIOTask(SDL_WiiUAsyncIOTaskData *taskdata)
 {
     SDL_AsyncIOTask *task = taskdata->task;
     SDL_WiiUAsyncIOData *filedata = taskdata->filedata;
     FSStatus status;
 
-    if ((task->offset > UINT32_MAX) || (task->requested_size > UINT32_MAX)) {
-        return WIIU_FailAsyncTaskData(taskdata, SDL_SetError("Wii U async read exceeds supported range"));
+    if ((task->offset > UINT32_MAX) || (task->requested_size > SDL_SIZE_MAX)) {
+        return WIIU_FailAsyncTaskData(taskdata, SDL_SetError("Wii U async I/O exceeds supported range"));
     }
-    if (!WIIU_PrepareIOTaskBuffer(taskdata, false)) {
+    if (!WIIU_PrepareIOTaskBuffer(taskdata)) {
         return WIIU_FailAsyncTaskData(taskdata, false);
     }
 
     SDL_LockMutex(filedata->lock);
-    /* Cafe FS reports completed byte counts as element counts; size=1 makes those counts match SDL byte counts. */
-    status = FSReadFileWithPosAsync(&filedata->client,
-                                    &taskdata->cmd_block,
-                                    taskdata->io_buffer,
-                                    1,
-                                    (uint32_t) task->requested_size,
-                                    (uint32_t) task->offset,
-                                    filedata->handle,
-                                    0,
-                                    SDL_WIIU_ASYNCIO_ERROR_MASK,
-                                    &taskdata->async_data);
+    status = WIIU_SubmitIOTask(taskdata);
     SDL_UnlockMutex(filedata->lock);
     if (status == FS_STATUS_OK) {
         return true;
     }
-
-    return WIIU_FailAsyncTaskData(taskdata, SDL_WIIU_SetFSError("FSReadFileWithPosAsync", status));
-}
-
-static bool WIIU_IssueWriteTask(SDL_WiiUAsyncIOTaskData *taskdata)
-{
-    SDL_AsyncIOTask *task = taskdata->task;
-    SDL_WiiUAsyncIOData *filedata = taskdata->filedata;
-    FSStatus status;
-
-    if ((task->offset > UINT32_MAX) || (task->requested_size > UINT32_MAX)) {
-        return WIIU_FailAsyncTaskData(taskdata, SDL_SetError("Wii U async write exceeds supported range"));
-    }
-    if (!WIIU_PrepareIOTaskBuffer(taskdata, true)) {
-        return WIIU_FailAsyncTaskData(taskdata, false);
-    }
-
-    SDL_LockMutex(filedata->lock);
-    /* Cafe FS reports completed byte counts as element counts; size=1 makes those counts match SDL byte counts. */
-    status = FSWriteFileWithPosAsync(&filedata->client,
-                                     &taskdata->cmd_block,
-                                     taskdata->io_buffer,
-                                     1,
-                                     (uint32_t) task->requested_size,
-                                     (uint32_t) task->offset,
-                                     filedata->handle,
-                                     0,
-                                     SDL_WIIU_ASYNCIO_ERROR_MASK,
-                                     &taskdata->async_data);
-    SDL_UnlockMutex(filedata->lock);
-    if (status == FS_STATUS_OK) {
-        return true;
-    }
-
-    return WIIU_FailAsyncTaskData(taskdata, SDL_WIIU_SetFSError("FSWriteFileWithPosAsync", status));
+    return WIIU_FailAsyncTaskData(taskdata, SDL_WIIU_SetFSError("Async file I/O", status));
 }
 
 static bool WIIU_IssueCloseTask(SDL_WiiUAsyncIOTaskData *taskdata)
@@ -344,13 +323,12 @@ static Sint64 wiiu_asyncio_size(void *userdata)
     FSStatus status;
 
     FSInitCmdBlock(&cmd_block);
-    SDL_LockMutex(data->lock);
+    // This command has its own block; callbacks must remain free to continue I/O.
     status = FSGetStatFile(&data->client,
                            &cmd_block,
                            data->handle,
                            &stat,
                            SDL_WIIU_ASYNCIO_ERROR_MASK);
-    SDL_UnlockMutex(data->lock);
     if (status != FS_STATUS_OK) {
         SDL_WIIU_SetFSError("FSGetStatFile", status);
         return -1;
@@ -372,7 +350,7 @@ static bool wiiu_asyncio_read(void *userdata, SDL_AsyncIOTask *task)
     if (!taskdata) {
         return false;
     }
-    return WIIU_IssueReadTask(taskdata);
+    return WIIU_IssueIOTask(taskdata);
 }
 
 static bool wiiu_asyncio_write(void *userdata, SDL_AsyncIOTask *task)
@@ -388,7 +366,7 @@ static bool wiiu_asyncio_write(void *userdata, SDL_AsyncIOTask *task)
     if (!taskdata) {
         return false;
     }
-    return WIIU_IssueWriteTask(taskdata);
+    return WIIU_IssueIOTask(taskdata);
 }
 
 static bool wiiu_asyncio_close(void *userdata, SDL_AsyncIOTask *task)
@@ -423,17 +401,16 @@ static bool wiiu_asyncioqueue_queue_task(void *userdata, SDL_AsyncIOTask *task)
 
 static void wiiu_asyncioqueue_cancel_task(void *userdata, SDL_AsyncIOTask *task)
 {
-    SDL_WiiUAsyncIOTaskData *taskdata = (SDL_WiiUAsyncIOTaskData *) task->backenddata;
-    SDL_WiiUAsyncIOData *filedata;
+    SDL_WiiUAsyncIOData *filedata = (SDL_WiiUAsyncIOData *) task->asyncio->userdata;
+    SDL_WiiUAsyncIOTaskData *taskdata;
     (void) userdata;
 
-    if (!taskdata) {
-        return;
-    }
-
-    filedata = taskdata->filedata;
     SDL_LockMutex(filedata->lock);
-    FSCancelCommand(&filedata->client, &taskdata->cmd_block);
+    taskdata = (SDL_WiiUAsyncIOTaskData *) task->backenddata;
+    if (taskdata) {
+        taskdata->cancelled = true;
+        FSCancelCommand(&filedata->client, &taskdata->cmd_block);
+    }
     SDL_UnlockMutex(filedata->lock);
 }
 

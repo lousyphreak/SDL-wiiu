@@ -35,8 +35,6 @@
 #define SDL_WIIU_EXTERNAL_VOLUME_ROOT "/vol/external01"
 #define SDL_WIIU_EXTERNAL_SAVE_ROOT "/vol/external01/save/"
 #define SDL_WIIU_PATH_CAPACITY (FS_MAX_PATH + 2)
-#define SDL_WIIU_IO_ALIGNMENT 64
-#define SDL_WIIU_IO_BUFFER_SIZE 4096
 #define SDL_WIIU_FSTIME_EPOCH_DIFF_SECONDS 315532800ULL
 #define SDL_WIIU_FS_ERROR_MASK FS_ERROR_FLAG_ALL
 
@@ -55,6 +53,7 @@ struct SDL_WIIUFile
     bool writable;
     bool append;
     Uint8 *buffer;
+    size_t buffer_capacity;
 };
 
 static SDL_WiiUFSState SDL_wiiu_fs_state;
@@ -798,16 +797,25 @@ static size_t SDL_WIIU_TransferFile(SDL_WIIUFile *file, void *ptr, size_t size, 
 
     while (total < size) {
         Uint8 *io_ptr;
-        size_t chunk = size - total;
+        size_t chunk = SDL_WIIU_GetTransferSize(src + total, size - total);
         FSStatus fs_status;
 
-        if (chunk > SDL_WIIU_IO_BUFFER_SIZE) {
-            chunk = SDL_WIIU_IO_BUFFER_SIZE;
-        }
-
-        if ((((uintptr_t) (writing ? (const void *) (src + total) : (void *) (dst + total))) & (SDL_WIIU_IO_ALIGNMENT - 1)) == 0) {
+        if ((((uintptr_t) (src + total) | chunk) & (SDL_WIIU_IO_ALIGNMENT - 1)) == 0) {
             io_ptr = writing ? (Uint8 *) (src + total) : (dst + total);
         } else {
+            if (chunk > file->buffer_capacity) {
+                const size_t capacity = (chunk + SDL_WIIU_IO_ALIGNMENT - 1) & ~(SDL_WIIU_IO_ALIGNMENT - 1);
+                Uint8 *buffer = (Uint8 *) SDL_aligned_alloc(SDL_WIIU_IO_ALIGNMENT, capacity);
+                if (!buffer) {
+                    if (status) {
+                        *status = SDL_IO_STATUS_ERROR;
+                    }
+                    break;
+                }
+                SDL_aligned_free(file->buffer);
+                file->buffer = buffer;
+                file->buffer_capacity = capacity;
+            }
             io_ptr = file->buffer;
             if (writing) {
                 SDL_memcpy(io_ptr, src + total, chunk);
@@ -976,20 +984,6 @@ extern "C" SDL_WIIUFile *SDL_WIIU_OpenFile(const char *path, const char *mode)
     file->readable = parsed.readable;
     file->writable = parsed.writable;
     file->append = parsed.append;
-    file->buffer = (Uint8 *) SDL_aligned_alloc(SDL_WIIU_IO_ALIGNMENT, SDL_WIIU_IO_BUFFER_SIZE);
-    if (!file->buffer) {
-        if (SDL_WIIU_LockFSState()) {
-            (void) FSCloseFile(&SDL_wiiu_fs_state.fs_client,
-                               &SDL_wiiu_fs_state.fs_cmd_block,
-                               handle,
-                               SDL_WIIU_FS_ERROR_MASK);
-            SDL_WIIU_UnlockFSState();
-        }
-        SDL_free(file);
-        SDL_free(resolved);
-        return NULL;
-    }
-
     SDL_free(resolved);
     return file;
 }

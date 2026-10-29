@@ -4645,11 +4645,12 @@ extern "C" {
  *
  * Each open Wii U file stream gets its own region cache. Region size controls
  * both the cache granularity and the amount of data SDL asks the Wii U async
- * filesystem API to prefetch for the next sequential region.
+ * filesystem API to prefetch for the next sequential region. Large reads use
+ * the caller's buffer directly instead of filling successive cache regions.
  *
  * The variable can be set to a decimal integer value between 4096 and 262144.
  *
- * The default is "32768".
+ * The default is "65536".
  *
  * This hint should be set before the first Wii U file is opened.
  *

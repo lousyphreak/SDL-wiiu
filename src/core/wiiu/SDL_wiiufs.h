@@ -33,6 +33,26 @@ extern "C" {
 
 typedef struct SDL_WIIUFile SDL_WIIUFile;
 
+#define SDL_WIIU_IO_ALIGNMENT 64
+#define SDL_WIIU_IO_BUFFER_SIZE (64 * 1024)
+#define SDL_WIIU_IO_MAX_BOUNCE_SIZE (1024 * 1024)
+
+static inline size_t SDL_WIIU_GetTransferSize(const void *buffer, size_t remaining)
+{
+    const size_t misalignment = (uintptr_t) buffer & (SDL_WIIU_IO_ALIGNMENT - 1);
+    if (misalignment) {
+        // Keep file offsets on their original block boundaries while bouncing.
+        return SDL_min(remaining, SDL_WIIU_IO_MAX_BOUNCE_SIZE);
+    }
+    if (remaining < SDL_WIIU_IO_ALIGNMENT) {
+        return remaining;
+    }
+    // Keep partial cache lines in scratch storage instead of sharing them with DMA.
+    remaining &= ~(SDL_WIIU_IO_ALIGNMENT - 1);
+    // FS returns a signed element count. Keep subsequent buffers aligned if split.
+    return SDL_min(remaining, (size_t) (SDL_MAX_SINT32 & ~(SDL_WIIU_IO_ALIGNMENT - 1)));
+}
+
 extern char *SDL_WIIU_GetBasePath(void);
 extern char *SDL_WIIU_GetCurrentDirectory(void);
 extern char *SDL_WIIU_GetPrefPath(const char *org, const char *app);

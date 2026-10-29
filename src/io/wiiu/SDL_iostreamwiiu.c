@@ -33,10 +33,10 @@
 #define WIIU_REGION_CACHE_DEFAULT_BUFFERS 4
 #define WIIU_REGION_CACHE_MIN_BUFFERS     2
 #define WIIU_REGION_CACHE_MAX_BUFFERS     16
-#define WIIU_REGION_CACHE_DEFAULT_SIZE    (32 * 1024)
+#define WIIU_REGION_CACHE_DEFAULT_SIZE    (64 * 1024)
 #define WIIU_REGION_CACHE_MIN_SIZE        (4 * 1024)
 #define WIIU_REGION_CACHE_MAX_SIZE        (256 * 1024)
-#define WIIU_WRITEBEHIND_BUFFER_SIZE (16 * 1024)
+#define WIIU_WRITEBEHIND_BUFFER_SIZE (64 * 1024)
 #define WIIU_IO_BUFFER_ALIGNMENT     64
 #define WIIU_IO_PREFETCH_ERROR_MASK  FS_ERROR_FLAG_ALL
 #define WIIU_IO_INVALID_REGION       SDL_MAX_UINT64
@@ -73,7 +73,6 @@ typedef struct SDL_WiiUIORegionSlot
     Uint64 region;
     Uint64 last_used;
     size_t valid_bytes;
-    int generation;
     FSCmdBlock cmd_block;
     FSAsyncData async_data;
     SDL_AtomicInt state;
@@ -82,6 +81,8 @@ typedef struct SDL_WiiUIORegionSlot
 struct SDL_WiiUIOData
 {
     SDL_WIIUFile *file;
+    SDL_Mutex *prefetch_lock;
+    SDL_Condition *prefetch_condition;
     char *prefetch_path;
     Uint8 *cache_memory;
     SDL_WiiUIORegionSlot *slots;
@@ -93,12 +94,10 @@ struct SDL_WiiUIOData
     size_t write_buffer_pos;
     size_t region_size;
     int num_slots;
-    SDL_AtomicInt cache_generation;
     bool physical_position_valid;
     bool readable;
     bool writable;
     bool append;
-    bool prefetch_available;
     bool prefetch_failed;
     bool prefetch_handle_open;
     FSFileHandle prefetch_handle;
@@ -182,61 +181,30 @@ static bool WIIU_IO_InitPrefetchClient(void)
     return SDL_wiiu_prefetch_state.client_ready;
 }
 
-static int WIIU_IO_GetCurrentGeneration(SDL_WiiUIOData *data)
-{
-    return SDL_GetAtomicInt(&data->cache_generation);
-}
-
-static int WIIU_IO_AdvanceGeneration(SDL_WiiUIOData *data)
-{
-    return SDL_AddAtomicInt(&data->cache_generation, 1) + 1;
-}
-
 static void WIIU_IO_ResetSlot(SDL_WiiUIORegionSlot *slot)
 {
     slot->region = WIIU_IO_INVALID_REGION;
     slot->last_used = 0;
     slot->valid_bytes = 0;
-    slot->generation = 0;
     SDL_SetAtomicInt(&slot->state, WIIU_IO_REGION_EMPTY);
-}
-
-static bool WIIU_IO_GetRegionStart(const SDL_WiiUIOData *data, Uint64 region, Uint64 *position)
-{
-    if (region > (SDL_MAX_UINT64 / data->region_size)) {
-        return SDL_SetError("Wii U file region exceeds supported range");
-    }
-
-    *position = region * data->region_size;
-    return true;
 }
 
 static void WIIU_IO_PrefetchCallback(FSClient *client, FSCmdBlock *block, FSStatus result, uint32_t context)
 {
     SDL_WiiUIORegionSlot *slot = (SDL_WiiUIORegionSlot *) (uintptr_t) context;
     SDL_WiiUIOData *data = slot->owner;
-    const int current_generation = WIIU_IO_GetCurrentGeneration(data);
     (void) client;
     (void) block;
 
-    if ((slot->generation != current_generation) || (result == FS_STATUS_CANCELLED)) {
-        WIIU_IO_ResetSlot(slot);
-        return;
-    }
-
-    if (result == FS_STATUS_END) {
-        slot->valid_bytes = 0;
+    SDL_LockMutex(data->prefetch_lock);
+    if (result < 0 && result != FS_STATUS_END) {
+        SDL_SetAtomicInt(&slot->state, WIIU_IO_REGION_EMPTY);
+    } else {
+        slot->valid_bytes = (result == FS_STATUS_END) ? 0 : (size_t) result;
         SDL_SetAtomicInt(&slot->state, WIIU_IO_REGION_READY);
-        return;
     }
-
-    if (result < 0) {
-        WIIU_IO_ResetSlot(slot);
-        return;
-    }
-
-    slot->valid_bytes = (size_t) result;
-    SDL_SetAtomicInt(&slot->state, WIIU_IO_REGION_READY);
+    SDL_BroadcastCondition(data->prefetch_condition);
+    SDL_UnlockMutex(data->prefetch_lock);
 }
 
 static bool WIIU_IO_OpenPrefetchHandle(SDL_WiiUIOData *data, const char *file)
@@ -277,7 +245,6 @@ static bool WIIU_IO_OpenPrefetchHandle(SDL_WiiUIOData *data, const char *file)
     }
 
     data->prefetch_handle_open = true;
-    data->prefetch_available = true;
     return true;
 }
 
@@ -285,10 +252,11 @@ static void WIIU_IO_CancelPendingPrefetch(SDL_WiiUIOData *data)
 {
     int i;
 
-    if (!data->prefetch_available) {
+    if (!data->prefetch_handle_open) {
         return;
     }
 
+    SDL_LockMutex(data->prefetch_lock);
     SDL_LockMutex(SDL_wiiu_prefetch_state.lock);
     for (i = 0; i < data->num_slots; ++i) {
         SDL_WiiUIORegionSlot *slot = &data->slots[i];
@@ -297,31 +265,28 @@ static void WIIU_IO_CancelPendingPrefetch(SDL_WiiUIOData *data)
         }
     }
     SDL_UnlockMutex(SDL_wiiu_prefetch_state.lock);
+
+    // Cancellation is asynchronous; callbacks must finish before reuse or writes.
+    for (i = 0; i < data->num_slots; ++i) {
+        while (SDL_GetAtomicInt(&data->slots[i].state) == WIIU_IO_REGION_LOADING) {
+            SDL_WaitCondition(data->prefetch_condition, data->prefetch_lock);
+        }
+    }
+    SDL_UnlockMutex(data->prefetch_lock);
 }
 
 static void WIIU_IO_InvalidateReadCache(SDL_WiiUIOData *data)
 {
-    const int generation = WIIU_IO_AdvanceGeneration(data);
     int i;
 
     WIIU_IO_CancelPendingPrefetch(data);
-
     for (i = 0; i < data->num_slots; ++i) {
-        SDL_WiiUIORegionSlot *slot = &data->slots[i];
-        if (SDL_GetAtomicInt(&slot->state) == WIIU_IO_REGION_LOADING) {
-            slot->generation = generation - 1;
-            slot->region = WIIU_IO_INVALID_REGION;
-            slot->valid_bytes = 0;
-            slot->last_used = 0;
-        } else {
-            WIIU_IO_ResetSlot(slot);
-        }
+        WIIU_IO_ResetSlot(&data->slots[i]);
     }
 }
 
 static SDL_WiiUIORegionSlot *WIIU_IO_FindReadySlot(SDL_WiiUIOData *data, Uint64 region)
 {
-    const int generation = WIIU_IO_GetCurrentGeneration(data);
     int i;
 
     for (i = 0; i < data->num_slots; ++i) {
@@ -329,10 +294,6 @@ static SDL_WiiUIORegionSlot *WIIU_IO_FindReadySlot(SDL_WiiUIOData *data, Uint64 
         const int state = SDL_GetAtomicInt(&slot->state);
 
         if (state == WIIU_IO_REGION_READY) {
-            if (slot->generation != generation) {
-                WIIU_IO_ResetSlot(slot);
-                continue;
-            }
             if (slot->region == region) {
                 slot->last_used = ++data->access_counter;
                 return slot;
@@ -345,16 +306,11 @@ static SDL_WiiUIORegionSlot *WIIU_IO_FindReadySlot(SDL_WiiUIOData *data, Uint64 
 
 static bool WIIU_IO_HasReadySlot(SDL_WiiUIOData *data, Uint64 region)
 {
-    const int generation = WIIU_IO_GetCurrentGeneration(data);
     int i;
 
     for (i = 0; i < data->num_slots; ++i) {
         SDL_WiiUIORegionSlot *slot = &data->slots[i];
         if (SDL_GetAtomicInt(&slot->state) == WIIU_IO_REGION_READY) {
-            if (slot->generation != generation) {
-                WIIU_IO_ResetSlot(slot);
-                continue;
-            }
             if (slot->region == region) {
                 return true;
             }
@@ -366,13 +322,11 @@ static bool WIIU_IO_HasReadySlot(SDL_WiiUIOData *data, Uint64 region)
 
 static bool WIIU_IO_IsRegionLoading(SDL_WiiUIOData *data, Uint64 region)
 {
-    const int generation = WIIU_IO_GetCurrentGeneration(data);
     int i;
 
     for (i = 0; i < data->num_slots; ++i) {
         SDL_WiiUIORegionSlot *slot = &data->slots[i];
         if ((SDL_GetAtomicInt(&slot->state) == WIIU_IO_REGION_LOADING) &&
-            (slot->generation == generation) &&
             (slot->region == region)) {
             return true;
         }
@@ -383,7 +337,6 @@ static bool WIIU_IO_IsRegionLoading(SDL_WiiUIOData *data, Uint64 region)
 
 static SDL_WiiUIORegionSlot *WIIU_IO_SelectVictimSlot(SDL_WiiUIOData *data, Uint64 pinned_region)
 {
-    const int generation = WIIU_IO_GetCurrentGeneration(data);
     SDL_WiiUIORegionSlot *victim = NULL;
     int i;
 
@@ -394,12 +347,8 @@ static SDL_WiiUIORegionSlot *WIIU_IO_SelectVictimSlot(SDL_WiiUIOData *data, Uint
         if (state == WIIU_IO_REGION_EMPTY) {
             return slot;
         }
-        if ((state == WIIU_IO_REGION_READY) && (slot->generation != generation)) {
-            WIIU_IO_ResetSlot(slot);
-            return slot;
-        }
         if (state == WIIU_IO_REGION_READY) {
-            if ((slot->generation == generation) && (slot->region == pinned_region)) {
+            if (slot->region == pinned_region) {
                 continue;
             }
             if (!victim || (slot->last_used < victim->last_used)) {
@@ -431,16 +380,8 @@ static size_t WIIU_IO_ReadDirect(SDL_WiiUIOData *data, void *ptr, size_t size, S
 
 static bool WIIU_IO_LoadRegionSync(SDL_WiiUIOData *data, SDL_WiiUIORegionSlot *slot, Uint64 region, SDL_IOStatus *status)
 {
-    const int generation = WIIU_IO_GetCurrentGeneration(data);
-    Uint64 position;
+    const Uint64 position = region * data->region_size;
     size_t bytes;
-
-    if (!WIIU_IO_GetRegionStart(data, region, &position)) {
-        if (status && *status == SDL_IO_STATUS_READY) {
-            *status = SDL_IO_STATUS_ERROR;
-        }
-        return false;
-    }
 
     if (!WIIU_IO_SeekPhysical(data, position)) {
         if (status && *status == SDL_IO_STATUS_READY) {
@@ -456,7 +397,6 @@ static bool WIIU_IO_LoadRegionSync(SDL_WiiUIOData *data, SDL_WiiUIORegionSlot *s
     }
 
     slot->region = region;
-    slot->generation = generation;
     slot->valid_bytes = bytes;
     slot->last_used = ++data->access_counter;
     data->physical_position = position + bytes;
@@ -470,7 +410,6 @@ static void WIIU_IO_EnsurePrefetch(SDL_WiiUIOData *data, Uint64 region)
     SDL_WiiUIORegionSlot *slot;
     Uint64 position;
     FSStatus status;
-    const int generation = WIIU_IO_GetCurrentGeneration(data);
 
     if (data->prefetch_failed) {
         return;
@@ -480,13 +419,10 @@ static void WIIU_IO_EnsurePrefetch(SDL_WiiUIOData *data, Uint64 region)
         return;
     }
 
-    if (!WIIU_IO_GetRegionStart(data, region, &position)) {
-        SDL_ClearError();
+    if (region > UINT32_MAX / data->region_size) {
         return;
     }
-    if ((position > UINT32_MAX) || (data->region_size > UINT32_MAX)) {
-        return;
-    }
+    position = region * data->region_size;
 
     if (!data->prefetch_handle_open) {
         if (!data->prefetch_path || !WIIU_IO_OpenPrefetchHandle(data, data->prefetch_path)) {
@@ -501,7 +437,6 @@ static void WIIU_IO_EnsurePrefetch(SDL_WiiUIOData *data, Uint64 region)
     }
 
     slot->region = region;
-    slot->generation = generation;
     slot->valid_bytes = 0;
     slot->last_used = ++data->access_counter;
     FSInitCmdBlock(&slot->cmd_block);
@@ -594,19 +529,6 @@ static Sint64 WIIU_IO_GetEffectiveSize(SDL_WiiUIOData *data)
     return base_size;
 }
 
-static bool WIIU_IO_HasPendingPrefetch(SDL_WiiUIOData *data)
-{
-    int i;
-
-    for (i = 0; i < data->num_slots; ++i) {
-        if (SDL_GetAtomicInt(&data->slots[i].state) == WIIU_IO_REGION_LOADING) {
-            return true;
-        }
-    }
-
-    return false;
-}
-
 static void WIIU_IO_ShutdownPrefetch(SDL_WiiUIOData *data)
 {
     FSCmdBlock cmd_block;
@@ -616,22 +538,15 @@ static void WIIU_IO_ShutdownPrefetch(SDL_WiiUIOData *data)
     }
 
     WIIU_IO_CancelPendingPrefetch(data);
-    while (WIIU_IO_HasPendingPrefetch(data)) {
-        SDL_Delay(0);
-    }
 
-    if (data->prefetch_handle_open) {
-        FSInitCmdBlock(&cmd_block);
-        SDL_LockMutex(SDL_wiiu_prefetch_state.lock);
-        (void) FSCloseFile(&SDL_wiiu_prefetch_state.client,
-                           &cmd_block,
-                           data->prefetch_handle,
-                           WIIU_IO_PREFETCH_ERROR_MASK);
-        SDL_UnlockMutex(SDL_wiiu_prefetch_state.lock);
-        data->prefetch_handle_open = false;
-    }
-
-    data->prefetch_available = false;
+    FSInitCmdBlock(&cmd_block);
+    SDL_LockMutex(SDL_wiiu_prefetch_state.lock);
+    (void) FSCloseFile(&SDL_wiiu_prefetch_state.client,
+                       &cmd_block,
+                       data->prefetch_handle,
+                       WIIU_IO_PREFETCH_ERROR_MASK);
+    SDL_UnlockMutex(SDL_wiiu_prefetch_state.lock);
+    data->prefetch_handle_open = false;
 }
 
 static Sint64 SDLCALL WIIU_IO_Size(void *userdata)
@@ -700,58 +615,70 @@ static size_t SDLCALL WIIU_IO_Read(void *userdata, void *ptr, size_t size, SDL_I
         const Uint64 region = data->logical_position / data->region_size;
         const size_t region_offset = (size_t) (data->logical_position % data->region_size);
 
+        SDL_LockMutex(data->prefetch_lock);
+        while (WIIU_IO_IsRegionLoading(data, region)) {
+            SDL_WaitCondition(data->prefetch_condition, data->prefetch_lock);
+        }
         slot = WIIU_IO_FindReadySlot(data, region);
-        if (!slot) {
-            if (!WIIU_IO_IsRegionLoading(data, region)) {
-                slot = WIIU_IO_SelectVictimSlot(data, WIIU_IO_INVALID_REGION);
-                if (slot && !WIIU_IO_LoadRegionSync(data, slot, region, status)) {
-                    break;
-                }
-            }
-            if (!slot) {
-                const size_t chunk = SDL_min(total_need, data->region_size - region_offset);
-                const size_t bytes = WIIU_IO_ReadDirect(data, dst, chunk, status);
-                if (bytes == 0) {
-                    break;
-                }
-                dst += bytes;
-                total_need -= bytes;
-                total_read += bytes;
-                data->logical_position += bytes;
-                if (bytes < chunk) {
-                    break;
-                }
-                continue;
+        SDL_UnlockMutex(data->prefetch_lock);
+
+        if (!slot && total_need < data->region_size) {
+            slot = WIIU_IO_SelectVictimSlot(data, WIIU_IO_INVALID_REGION);
+            if (slot && !WIIU_IO_LoadRegionSync(data, slot, region, status)) {
+                break;
             }
         }
+        if (!slot) {
+            size_t chunk = total_need;
+            int i;
 
-        if (slot) {
-            const size_t available = (region_offset < slot->valid_bytes) ? (slot->valid_bytes - region_offset) : 0;
-
-            if (available == 0) {
-                if (status && *status == SDL_IO_STATUS_READY) {
-                    *status = SDL_IO_STATUS_EOF;
+            // Leave future cached or outstanding regions for the next iteration.
+            for (i = 0; i < data->num_slots; ++i) {
+                SDL_WiiUIORegionSlot *next = &data->slots[i];
+                if (SDL_GetAtomicInt(&next->state) != WIIU_IO_REGION_EMPTY) {
+                    const Uint64 next_position = next->region * data->region_size;
+                    if (next_position > data->logical_position) {
+                        chunk = (size_t) SDL_min((Uint64) chunk, next_position - data->logical_position);
+                    }
                 }
+            }
+
+            const size_t bytes = WIIU_IO_ReadDirect(data, dst, chunk, status);
+            dst += bytes;
+            total_need -= bytes;
+            total_read += bytes;
+            data->logical_position += bytes;
+            if (bytes < chunk) {
                 break;
             }
+            continue;
+        }
 
-            const size_t chunk = SDL_min(total_need, available);
-            SDL_memcpy(dst, slot->buffer + region_offset, chunk);
-            dst += chunk;
-            total_need -= chunk;
-            total_read += chunk;
-            data->logical_position += chunk;
+        const size_t available = (region_offset < slot->valid_bytes) ? (slot->valid_bytes - region_offset) : 0;
 
-            if (slot->valid_bytes == data->region_size) {
-                WIIU_IO_EnsurePrefetch(data, region + 1);
+        if (available == 0) {
+            if (status && *status == SDL_IO_STATUS_READY) {
+                *status = SDL_IO_STATUS_EOF;
             }
+            break;
+        }
 
-            if ((chunk == available) && (slot->valid_bytes < data->region_size)) {
-                if (status && *status == SDL_IO_STATUS_READY) {
-                    *status = SDL_IO_STATUS_EOF;
-                }
-                break;
+        const size_t chunk = SDL_min(total_need, available);
+        SDL_memcpy(dst, slot->buffer + region_offset, chunk);
+        dst += chunk;
+        total_need -= chunk;
+        total_read += chunk;
+        data->logical_position += chunk;
+
+        if (slot->valid_bytes == data->region_size && total_need < data->region_size) {
+            WIIU_IO_EnsurePrefetch(data, region + 1);
+        }
+
+        if ((chunk == available) && (slot->valid_bytes < data->region_size)) {
+            if (status && *status == SDL_IO_STATUS_READY) {
+                *status = SDL_IO_STATUS_EOF;
             }
+            break;
         }
     }
 
@@ -800,26 +727,26 @@ static size_t SDLCALL WIIU_IO_Write(void *userdata, const void *ptr, size_t size
         }
     }
 
-    if (size >= WIIU_WRITEBEHIND_BUFFER_SIZE && data->write_buffer_pos == 0) {
-        if (!WIIU_IO_SeekPhysical(data, data->logical_position)) {
-            if (status && *status == SDL_IO_STATUS_READY) {
-                *status = SDL_IO_STATUS_ERROR;
+    while (remaining > 0) {
+        if (data->write_buffer_pos == 0) {
+            data->write_buffer_start = data->logical_position;
+            if (remaining >= WIIU_WRITEBEHIND_BUFFER_SIZE) {
+                if (!WIIU_IO_SeekPhysical(data, data->logical_position)) {
+                    if (status && *status == SDL_IO_STATUS_READY) {
+                        *status = SDL_IO_STATUS_ERROR;
+                    }
+                    break;
+                }
+
+                const size_t bytes = SDL_WIIU_FileWrite(data->file, src, remaining, status);
+                data->logical_position += bytes;
+                data->physical_position = data->logical_position;
+                data->physical_position_valid = true;
+                total_written += bytes;
+                break;
             }
-            return 0;
         }
 
-        const size_t bytes = SDL_WIIU_FileWrite(data->file, ptr, size, status);
-        data->logical_position += bytes;
-        data->physical_position = data->logical_position;
-        data->physical_position_valid = true;
-        return bytes;
-    }
-
-    if (data->write_buffer_pos == 0) {
-        data->write_buffer_start = data->logical_position;
-    }
-
-    while (remaining > 0) {
         const size_t space = WIIU_WRITEBEHIND_BUFFER_SIZE - data->write_buffer_pos;
         const size_t chunk = SDL_min(remaining, space);
 
@@ -834,7 +761,6 @@ static size_t SDLCALL WIIU_IO_Write(void *userdata, const void *ptr, size_t size
             if (!WIIU_IO_FlushWriteBuffer(data, status)) {
                 break;
             }
-            data->write_buffer_start = data->logical_position;
         }
     }
 
@@ -857,11 +783,13 @@ static bool SDLCALL WIIU_IO_Close(void *userdata)
 
     if (data) {
         SDL_IOStatus status = SDL_IO_STATUS_READY;
-        result = WIIU_IO_FlushWriteBuffer(data, &status);
         WIIU_IO_ShutdownPrefetch(data);
+        result = WIIU_IO_FlushWriteBuffer(data, &status);
         result = SDL_WIIU_FileClose(data->file) && result;
         SDL_free(data->prefetch_path);
         SDL_aligned_free(data->cache_memory);
+        SDL_DestroyCondition(data->prefetch_condition);
+        SDL_DestroyMutex(data->prefetch_lock);
         SDL_free(data);
     }
     return result;
@@ -877,17 +805,7 @@ SDL_IOStream *SDL_WIIU_IOFromFile(const char *file, const char *mode)
     SDL_IOStreamInterface iface;
     SDL_IOStream *stream;
 
-    if ((size_t) config->num_buffers > (SDL_SIZE_MAX / sizeof(*data->slots))) {
-        return SDL_SetError("Wii U cache metadata exceeds SDL_SIZE_MAX"), (SDL_IOStream *) NULL;
-    }
-    if (config->region_size > (SDL_SIZE_MAX / (size_t) config->num_buffers)) {
-        return SDL_SetError("Wii U cache allocation exceeds SDL_SIZE_MAX"), (SDL_IOStream *) NULL;
-    }
-    if ((size_t) config->num_buffers > ((SDL_SIZE_MAX - sizeof(*data) - WIIU_WRITEBEHIND_BUFFER_SIZE) / sizeof(*data->slots))) {
-        return SDL_SetError("Wii U cache state exceeds SDL_SIZE_MAX"), (SDL_IOStream *) NULL;
-    }
-
-    data_bytes = sizeof(*data) + ((size_t) config->num_buffers * sizeof(*data->slots)) + WIIU_WRITEBEHIND_BUFFER_SIZE;
+    data_bytes = sizeof(*data) + ((size_t) config->num_buffers * sizeof(*data->slots));
     cache_bytes = config->region_size * (size_t) config->num_buffers;
 
     data = (SDL_WiiUIOData *) SDL_calloc(1, data_bytes);
@@ -896,7 +814,6 @@ SDL_IOStream *SDL_WIIU_IOFromFile(const char *file, const char *mode)
     }
 
     data->slots = (SDL_WiiUIORegionSlot *) (data + 1);
-    data->write_buffer = (Uint8 *) (data->slots + config->num_buffers);
 
     data->file = SDL_WIIU_OpenFile(file, mode);
     if (!data->file) {
@@ -914,15 +831,17 @@ SDL_IOStream *SDL_WIIU_IOFromFile(const char *file, const char *mode)
     data->physical_position = 0;
     data->num_slots = config->num_buffers;
     data->region_size = config->region_size;
-    SDL_SetAtomicInt(&data->cache_generation, 1);
     data->prefetch_path = SDL_strdup(file);
 
-    data->cache_memory = (Uint8 *) SDL_aligned_alloc(WIIU_IO_BUFFER_ALIGNMENT, cache_bytes);
-    if (!data->cache_memory) {
+    data->prefetch_lock = SDL_CreateMutex();
+    data->prefetch_condition = SDL_CreateCondition();
+    data->cache_memory = (Uint8 *) SDL_aligned_alloc(WIIU_IO_BUFFER_ALIGNMENT, cache_bytes + WIIU_WRITEBEHIND_BUFFER_SIZE);
+    if (!data->prefetch_lock || !data->prefetch_condition || !data->cache_memory) {
         WIIU_IO_Close(data);
         return NULL;
     }
 
+    data->write_buffer = data->cache_memory + cache_bytes;
     for (i = 0; i < data->num_slots; ++i) {
         SDL_WiiUIORegionSlot *slot = &data->slots[i];
         slot->owner = data;

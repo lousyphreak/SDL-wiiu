@@ -45,7 +45,7 @@ bool SDL_SYS_CopyFile(const char *oldpath, const char *newpath)
     char *buffer = NULL;
     SDL_IOStream *input = NULL;
     SDL_IOStream *output = NULL;
-    const size_t maxlen = 4096;
+    const size_t maxlen = SDL_WIIU_IO_BUFFER_SIZE;
     size_t len;
     bool result = false;
 
@@ -59,7 +59,7 @@ bool SDL_SYS_CopyFile(const char *oldpath, const char *newpath)
         goto done;
     }
 
-    buffer = (char *) SDL_malloc(maxlen);
+    buffer = (char *) SDL_aligned_alloc(SDL_WIIU_IO_ALIGNMENT, maxlen);
     if (!buffer) {
         goto done;
     }
@@ -90,7 +90,7 @@ done:
     if (input) {
         SDL_CloseIO(input);
     }
-    SDL_free(buffer);
+    SDL_aligned_free(buffer);
 
     return result;
 }
