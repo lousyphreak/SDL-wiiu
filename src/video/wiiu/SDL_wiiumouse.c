@@ -35,6 +35,8 @@ typedef struct SDL_WiiUMouseState
     bool right_down;
     bool middle_down;
     SDL_Window *window;
+    int window_width;
+    int window_height;
     float x;
     float y;
 } SDL_WiiUMouseState;
@@ -63,7 +65,7 @@ static SDL_Window *SDL_WIIU_GetPointerWindow(SDL_VideoDevice *_this)
     return SDL_WIIU_GetOutputWindow(_this, SDL_WIIU_DISPLAY_TV);
 }
 
-static bool SDL_WIIU_ProjectMouseForWindow(SDL_VideoDevice *_this, SDL_Window *window, const KPADStatus *status, float *x, float *y)
+static bool SDL_WIIU_ProjectMouseForWindow(SDL_VideoDevice *_this, SDL_Window *window, const KPADStatus *status, bool relative, float *x, float *y)
 {
     SDL_VideoData *driverdata = (SDL_VideoData *)_this->internal;
     SDL_Rect content_rect;
@@ -92,21 +94,31 @@ static bool SDL_WIIU_ProjectMouseForWindow(SDL_VideoDevice *_this, SDL_Window *w
         *x = 0.0f;
     } else {
         const float normalized_x = ((projected.x - (float)content_rect.x) / (float)(content_rect.w - 1));
-        *x = SDL_clamp(normalized_x, 0.0f, 1.0f) * (float)(src_w - 1);
+        *x = (relative ? normalized_x : SDL_clamp(normalized_x, 0.0f, 1.0f)) * (float)(src_w - 1);
     }
 
     if (src_h <= 1) {
         *y = 0.0f;
     } else {
         const float normalized_y = ((projected.y - (float)content_rect.y) / (float)(content_rect.h - 1));
-        *y = SDL_clamp(normalized_y, 0.0f, 1.0f) * (float)(src_h - 1);
+        *y = (relative ? normalized_y : SDL_clamp(normalized_y, 0.0f, 1.0f)) * (float)(src_h - 1);
     }
 
     return true;
 }
 
+static bool SDL_WIIU_SetRelativeMouseMode(bool enabled)
+{
+    (void)enabled;
+
+    // The first valid IR sample establishes a new baseline in either mode.
+    SDL_WIIU_mouse_state.has_position = false;
+    return true;
+}
+
 bool SDL_WIIU_InitMouse(SDL_VideoDevice *_this)
 {
+    SDL_Mouse *mouse = SDL_GetMouse();
     (void)_this;
 
     if (!SDL_WIIU_InitKPAD()) {
@@ -116,6 +128,7 @@ bool SDL_WIIU_InitMouse(SDL_VideoDevice *_this)
 
     SDL_zero(SDL_WIIU_mouse_state);
     SDL_WIIU_mouse_state.active_channel = -1;
+    mouse->SetRelativeMouseMode = SDL_WIIU_SetRelativeMouseMode;
     SDL_AddMouse(SDL_DEFAULT_MOUSE_ID, "Nintendo Wii Remote IR");
     return true;
 }
@@ -186,19 +199,32 @@ void SDL_WIIU_PollMouse(SDL_VideoDevice *_this)
     timestamp = active_state->timestamp_ns;
 
     if (window && active_state->status.posValid > 0) {
+        const bool relative = SDL_GetMouse()->relative_mode;
         float x = 0.0f;
         float y = 0.0f;
 
-        if (SDL_WIIU_ProjectMouseForWindow(_this, window, &active_state->status, &x, &y)) {
-            if (!SDL_WIIU_mouse_state.has_position ||
-                SDL_WIIU_mouse_state.window != window ||
-                SDL_WIIU_mouse_state.x != x ||
-                SDL_WIIU_mouse_state.y != y) {
+        if (SDL_WIIU_ProjectMouseForWindow(_this, window, &active_state->status, relative, &x, &y)) {
+            if (relative) {
+                // Do not turn acquisition, resize or window changes into motion.
+                // Unclamped IR positions preserve deltas outside the window edges.
+                if (SDL_WIIU_mouse_state.has_position &&
+                    SDL_WIIU_mouse_state.window == window &&
+                    SDL_WIIU_mouse_state.window_width == window->w &&
+                    SDL_WIIU_mouse_state.window_height == window->h) {
+                    SDL_SendMouseMotion(timestamp, window, SDL_DEFAULT_MOUSE_ID, true,
+                                        x - SDL_WIIU_mouse_state.x, y - SDL_WIIU_mouse_state.y);
+                }
+            } else if (!SDL_WIIU_mouse_state.has_position ||
+                       SDL_WIIU_mouse_state.window != window ||
+                       SDL_WIIU_mouse_state.x != x ||
+                       SDL_WIIU_mouse_state.y != y) {
                 SDL_SendMouseMotion(timestamp, window, SDL_DEFAULT_MOUSE_ID, false, x, y);
             }
 
             SDL_WIIU_mouse_state.has_position = true;
             SDL_WIIU_mouse_state.window = window;
+            SDL_WIIU_mouse_state.window_width = window->w;
+            SDL_WIIU_mouse_state.window_height = window->h;
             SDL_WIIU_mouse_state.x = x;
             SDL_WIIU_mouse_state.y = y;
         }
