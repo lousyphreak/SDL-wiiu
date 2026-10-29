@@ -1651,6 +1651,7 @@ static bool SDL_WIIU_CreateWindow(SDL_VideoDevice *_this, SDL_Window *window, SD
 
 static void SDL_WIIU_DestroyWindow(SDL_VideoDevice *_this, SDL_Window *window)
 {
+    SDL_WIIU_SuspendMouse();
     if (window && window->internal) {
         SDL_WindowData *windowdata = window->internal;
         if (!((SDL_VideoData *)_this->internal)->external_owner && windowdata->external_graphics && windowdata->external_graphics->release) {
