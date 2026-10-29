@@ -250,7 +250,8 @@ static void SDL_WIIU_PumpLifecycleInternal(bool send_exit_events)
 {
     ProcUIStatus status;
 
-    if (!SDL_wiiu_lifecycle.initialized || !SDL_wiiu_lifecycle.procui_active) {
+    if (!SDL_wiiu_lifecycle.initialized || !SDL_wiiu_lifecycle.procui_active ||
+        SDL_wiiu_lifecycle.phase == SDL_WIIU_LIFECYCLE_EXITING) {
         return;
     }
 
