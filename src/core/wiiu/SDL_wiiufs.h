@@ -68,6 +68,8 @@ extern Sint64 SDL_WIIU_FileSize(SDL_WIIUFile *file);
 extern Sint64 SDL_WIIU_FileSeek(SDL_WIIUFile *file, Sint64 offset, SDL_IOWhence whence);
 extern size_t SDL_WIIU_FileRead(SDL_WIIUFile *file, void *ptr, size_t size, SDL_IOStatus *status);
 extern size_t SDL_WIIU_FileWrite(SDL_WIIUFile *file, const void *ptr, size_t size, SDL_IOStatus *status);
+extern FSStatus SDL_WIIU_ReadFileAsync(SDL_WIIUFile *file, FSCmdBlock *block, void *buffer, Uint32 size, Uint32 position, FSAsyncData *async_data);
+extern void SDL_WIIU_CancelFileRead(FSCmdBlock *block);
 extern bool SDL_WIIU_FileFlush(SDL_WIIUFile *file, SDL_IOStatus *status);
 extern bool SDL_WIIU_FileClose(SDL_WIIUFile *file);
 extern bool SDL_WIIU_FlushUserSave(void);

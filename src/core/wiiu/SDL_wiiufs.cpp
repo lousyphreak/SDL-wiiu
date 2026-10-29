@@ -30,6 +30,8 @@
 #include <coreinit/filesystem.h>
 #include <coreinit/title.h>
 
+extern "C" void FSCancelCommand(FSClient *client, FSCmdBlock *block);
+
 #define SDL_WIIU_CONTENT_ROOT "/vol/content/"
 #define SDL_WIIU_CONTENT_ROOT_NO_SLASH "/vol/content"
 #define SDL_WIIU_EXTERNAL_VOLUME_ROOT "/vol/external01"
@@ -1084,6 +1086,20 @@ extern "C" Sint64 SDL_WIIU_FileSeek(SDL_WIIUFile *file, Sint64 offset, SDL_IOWhe
     }
 
     return (Sint64) target;
+}
+
+// These commands have their own blocks. Coreinit serializes the client's queue;
+// do not take the synchronous command-block lock when submitting or cancelling.
+extern "C" FSStatus SDL_WIIU_ReadFileAsync(SDL_WIIUFile *file, FSCmdBlock *block, void *buffer, Uint32 size, Uint32 position, FSAsyncData *async_data)
+{
+    return FSReadFileWithPosAsync(&SDL_wiiu_fs_state.fs_client, block, (Uint8 *) buffer,
+                                  1, size, position, file->handle, 0,
+                                  SDL_WIIU_FS_ERROR_MASK, async_data);
+}
+
+extern "C" void SDL_WIIU_CancelFileRead(FSCmdBlock *block)
+{
+    FSCancelCommand(&SDL_wiiu_fs_state.fs_client, block);
 }
 
 extern "C" size_t SDL_WIIU_FileRead(SDL_WIIUFile *file, void *ptr, size_t size, SDL_IOStatus *status)

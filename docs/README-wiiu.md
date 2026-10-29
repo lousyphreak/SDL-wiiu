@@ -8,7 +8,12 @@ Small reads fill a 64 KiB region cache. Each stream keeps four regions by defaul
 and prefetches the next region while the application consumes cached bytes. A
 read that catches up with prefetch waits for that operation and uses its result.
 Bulk reads consume any relevant cached/prefetched bytes, then transfer directly
-to the caller's buffer without filling successive cache regions.
+to the caller's buffer without filling successive cache regions. Prefetch uses
+positioned async reads on the stream's existing native handle, avoiding a second
+synchronous file open on the first cached read. These reads advance the native
+file position; subsequent synchronous transfers seek after queued prefetch work.
+Writes and close cancel and drain prefetch callbacks before changing or releasing
+the file.
 
 Small sequential writes accumulate in an aligned 64 KiB write buffer. Seeking,
 reading, flushing, or closing writes out pending bytes; large writes bypass an

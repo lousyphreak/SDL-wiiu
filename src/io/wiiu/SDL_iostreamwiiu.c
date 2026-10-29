@@ -38,10 +38,7 @@
 #define WIIU_REGION_CACHE_MAX_SIZE        (256 * 1024)
 #define WIIU_WRITEBEHIND_BUFFER_SIZE (64 * 1024)
 #define WIIU_IO_BUFFER_ALIGNMENT     64
-#define WIIU_IO_PREFETCH_ERROR_MASK  FS_ERROR_FLAG_ALL
 #define WIIU_IO_INVALID_REGION       SDL_MAX_UINT64
-
-extern void FSCancelCommand(FSClient *client, FSCmdBlock *block);
 
 typedef enum SDL_WiiUIORegionState
 {
@@ -55,14 +52,6 @@ typedef struct SDL_WiiUIOCacheConfig
     int num_buffers;
     size_t region_size;
 } SDL_WiiUIOCacheConfig;
-
-typedef struct SDL_WiiUIPrefetchState
-{
-    SDL_InitState init;
-    SDL_Mutex *lock;
-    FSClient client;
-    bool client_ready;
-} SDL_WiiUIPrefetchState;
 
 typedef struct SDL_WiiUIOData SDL_WiiUIOData;
 
@@ -83,7 +72,6 @@ struct SDL_WiiUIOData
     SDL_WIIUFile *file;
     SDL_Mutex *prefetch_lock;
     SDL_Condition *prefetch_condition;
-    char *prefetch_path;
     Uint8 *cache_memory;
     SDL_WiiUIORegionSlot *slots;
     Uint8 *write_buffer;
@@ -98,9 +86,6 @@ struct SDL_WiiUIOData
     bool readable;
     bool writable;
     bool append;
-    bool prefetch_failed;
-    bool prefetch_handle_open;
-    FSFileHandle prefetch_handle;
 };
 
 static SDL_InitState SDL_wiiu_io_cache_config_init;
@@ -108,7 +93,6 @@ static SDL_WiiUIOCacheConfig SDL_wiiu_io_cache_config = {
     WIIU_REGION_CACHE_DEFAULT_BUFFERS,
     WIIU_REGION_CACHE_DEFAULT_SIZE
 };
-static SDL_WiiUIPrefetchState SDL_wiiu_prefetch_state;
 
 static bool WIIU_IO_SeekPhysical(SDL_WiiUIOData *data, Uint64 position)
 {
@@ -155,32 +139,6 @@ static const SDL_WiiUIOCacheConfig *WIIU_IO_GetCacheConfig(void)
     return &SDL_wiiu_io_cache_config;
 }
 
-static bool WIIU_IO_InitPrefetchClient(void)
-{
-    if (SDL_ShouldInit(&SDL_wiiu_prefetch_state.init)) {
-        FSStatus status;
-
-        SDL_wiiu_prefetch_state.lock = SDL_CreateMutex();
-        if (!SDL_wiiu_prefetch_state.lock) {
-            return false;
-        }
-
-        FSInit();
-        status = FSAddClient(&SDL_wiiu_prefetch_state.client, WIIU_IO_PREFETCH_ERROR_MASK);
-        if (status != FS_STATUS_OK) {
-            SDL_DestroyMutex(SDL_wiiu_prefetch_state.lock);
-            SDL_wiiu_prefetch_state.lock = NULL;
-            SDL_ClearError();
-            return false;
-        }
-
-        SDL_wiiu_prefetch_state.client_ready = true;
-        SDL_SetInitialized(&SDL_wiiu_prefetch_state.init, true);
-    }
-
-    return SDL_wiiu_prefetch_state.client_ready;
-}
-
 static void WIIU_IO_ResetSlot(SDL_WiiUIORegionSlot *slot)
 {
     slot->region = WIIU_IO_INVALID_REGION;
@@ -207,64 +165,17 @@ static void WIIU_IO_PrefetchCallback(FSClient *client, FSCmdBlock *block, FSStat
     SDL_UnlockMutex(data->prefetch_lock);
 }
 
-static bool WIIU_IO_OpenPrefetchHandle(SDL_WiiUIOData *data, const char *file)
-{
-    FSCmdBlock cmd_block;
-    char *resolved = NULL;
-    FSStatus status;
-
-    if (!data->readable) {
-        return false;
-    }
-
-    resolved = SDL_WIIU_ResolveFSPath(file);
-    if (!resolved) {
-        SDL_ClearError();
-        return false;
-    }
-
-    if (!WIIU_IO_InitPrefetchClient()) {
-        SDL_free(resolved);
-        SDL_ClearError();
-        return false;
-    }
-
-    FSInitCmdBlock(&cmd_block);
-    SDL_LockMutex(SDL_wiiu_prefetch_state.lock);
-    status = FSOpenFile(&SDL_wiiu_prefetch_state.client,
-                        &cmd_block,
-                        resolved,
-                        "r",
-                        &data->prefetch_handle,
-                        WIIU_IO_PREFETCH_ERROR_MASK);
-    SDL_UnlockMutex(SDL_wiiu_prefetch_state.lock);
-    SDL_free(resolved);
-    if (status != FS_STATUS_OK) {
-        SDL_ClearError();
-        return false;
-    }
-
-    data->prefetch_handle_open = true;
-    return true;
-}
-
 static void WIIU_IO_CancelPendingPrefetch(SDL_WiiUIOData *data)
 {
     int i;
 
-    if (!data->prefetch_handle_open) {
-        return;
-    }
-
     SDL_LockMutex(data->prefetch_lock);
-    SDL_LockMutex(SDL_wiiu_prefetch_state.lock);
     for (i = 0; i < data->num_slots; ++i) {
         SDL_WiiUIORegionSlot *slot = &data->slots[i];
         if (SDL_GetAtomicInt(&slot->state) == WIIU_IO_REGION_LOADING) {
-            FSCancelCommand(&SDL_wiiu_prefetch_state.client, &slot->cmd_block);
+            SDL_WIIU_CancelFileRead(&slot->cmd_block);
         }
     }
-    SDL_UnlockMutex(SDL_wiiu_prefetch_state.lock);
 
     // Cancellation is asynchronous; callbacks must finish before reuse or writes.
     for (i = 0; i < data->num_slots; ++i) {
@@ -411,10 +322,6 @@ static void WIIU_IO_EnsurePrefetch(SDL_WiiUIOData *data, Uint64 region)
     Uint64 position;
     FSStatus status;
 
-    if (data->prefetch_failed) {
-        return;
-    }
-
     if (WIIU_IO_HasReadySlot(data, region) || WIIU_IO_IsRegionLoading(data, region)) {
         return;
     }
@@ -423,13 +330,6 @@ static void WIIU_IO_EnsurePrefetch(SDL_WiiUIOData *data, Uint64 region)
         return;
     }
     position = region * data->region_size;
-
-    if (!data->prefetch_handle_open) {
-        if (!data->prefetch_path || !WIIU_IO_OpenPrefetchHandle(data, data->prefetch_path)) {
-            data->prefetch_failed = true;
-            return;
-        }
-    }
 
     slot = WIIU_IO_SelectVictimSlot(data, (region > 0) ? (region - 1) : WIIU_IO_INVALID_REGION);
     if (!slot) {
@@ -445,18 +345,12 @@ static void WIIU_IO_EnsurePrefetch(SDL_WiiUIOData *data, Uint64 region)
     slot->async_data.param = (uint32_t) (uintptr_t) slot;
     SDL_SetAtomicInt(&slot->state, WIIU_IO_REGION_LOADING);
 
-    SDL_LockMutex(SDL_wiiu_prefetch_state.lock);
-    status = FSReadFileWithPosAsync(&SDL_wiiu_prefetch_state.client,
-                                    &slot->cmd_block,
-                                    slot->buffer,
-                                    1,
+    // Positioned reads also advance the native handle. The next synchronous
+    // transfer must seek after queued prefetch commands before using it again.
+    data->physical_position_valid = false;
+    status = SDL_WIIU_ReadFileAsync(data->file, &slot->cmd_block, slot->buffer,
                                     (uint32_t) data->region_size,
-                                    (uint32_t) position,
-                                    data->prefetch_handle,
-                                    0,
-                                    WIIU_IO_PREFETCH_ERROR_MASK,
-                                    &slot->async_data);
-    SDL_UnlockMutex(SDL_wiiu_prefetch_state.lock);
+                                    (uint32_t) position, &slot->async_data);
     if (status != FS_STATUS_OK) {
         WIIU_IO_ResetSlot(slot);
     }
@@ -527,26 +421,6 @@ static Sint64 WIIU_IO_GetEffectiveSize(SDL_WiiUIOData *data)
     }
 
     return base_size;
-}
-
-static void WIIU_IO_ShutdownPrefetch(SDL_WiiUIOData *data)
-{
-    FSCmdBlock cmd_block;
-
-    if (!data->prefetch_handle_open) {
-        return;
-    }
-
-    WIIU_IO_CancelPendingPrefetch(data);
-
-    FSInitCmdBlock(&cmd_block);
-    SDL_LockMutex(SDL_wiiu_prefetch_state.lock);
-    (void) FSCloseFile(&SDL_wiiu_prefetch_state.client,
-                       &cmd_block,
-                       data->prefetch_handle,
-                       WIIU_IO_PREFETCH_ERROR_MASK);
-    SDL_UnlockMutex(SDL_wiiu_prefetch_state.lock);
-    data->prefetch_handle_open = false;
 }
 
 static Sint64 SDLCALL WIIU_IO_Size(void *userdata)
@@ -783,10 +657,9 @@ static bool SDLCALL WIIU_IO_Close(void *userdata)
 
     if (data) {
         SDL_IOStatus status = SDL_IO_STATUS_READY;
-        WIIU_IO_ShutdownPrefetch(data);
+        WIIU_IO_CancelPendingPrefetch(data);
         result = WIIU_IO_FlushWriteBuffer(data, &status);
         result = SDL_WIIU_FileClose(data->file) && result;
-        SDL_free(data->prefetch_path);
         SDL_aligned_free(data->cache_memory);
         SDL_DestroyCondition(data->prefetch_condition);
         SDL_DestroyMutex(data->prefetch_lock);
@@ -831,7 +704,6 @@ SDL_IOStream *SDL_WIIU_IOFromFile(const char *file, const char *mode)
     data->physical_position = 0;
     data->num_slots = config->num_buffers;
     data->region_size = config->region_size;
-    data->prefetch_path = SDL_strdup(file);
 
     data->prefetch_lock = SDL_CreateMutex();
     data->prefetch_condition = SDL_CreateCondition();
