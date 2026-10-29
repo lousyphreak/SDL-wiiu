@@ -1200,8 +1200,6 @@ static void SDL_WIIU_ReleaseForegroundRenderers(SDL_VideoDevice *_this, SDL_Vide
     SDL_Window *window;
 
     for (window = _this->windows; window; window = window->next) {
-        int i;
-
         SDL_WindowData *windowdata = window->internal;
         if (windowdata && windowdata->external_graphics) {
             SDL_WiiUExternalGraphics *graphics = windowdata->external_graphics;
@@ -1210,9 +1208,11 @@ static void SDL_WIIU_ReleaseForegroundRenderers(SDL_VideoDevice *_this, SDL_Vide
             }
             graphics->color = NULL;
         }
-        for (i = 0; i < window->num_renderers; ++i) {
+#ifdef SDL_VIDEO_RENDER_WIIU
+        for (int i = 0; i < window->num_renderers; ++i) {
             SDL_WIIU_ReleaseForegroundRendererResources(window->renderers[i], driverdata->mem1_heap, driverdata->foreground_heap);
         }
+#endif
     }
 }
 
