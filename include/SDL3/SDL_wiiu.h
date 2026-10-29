@@ -70,6 +70,59 @@ typedef struct SDL_WiiUExternalGraphics
     void *userdata;
 } SDL_WiiUExternalGraphics;
 
+/** Native keyboard operations dispatched to an external GX2 owner. */
+typedef enum SDL_WiiUTextInputGraphicsOperation
+{
+    SDL_WIIU_TEXT_INPUT_GRAPHICS_INITIALIZE,
+    SDL_WIIU_TEXT_INPUT_GRAPHICS_UPDATE,
+    SDL_WIIU_TEXT_INPUT_GRAPHICS_SHUTDOWN
+} SDL_WiiUTextInputGraphicsOperation;
+
+typedef void (SDLCALL *SDL_WiiUTextInputCallback)(void *userdata);
+typedef void (SDLCALL *SDL_WiiUTextInputDrawCallback)(void);
+
+/**
+ * Native keyboard graphics bridge for SDL_HINT_VIDEO_EXTERNAL_GRAPHICS.
+ *
+ * Set a persistent pointer on SDL_GetWindowProperties(window) using
+ * SDL_PROP_WINDOW_WIIU_TEXT_INPUT_GRAPHICS_POINTER before starting text input.
+ * SDL owns keyboard configuration, controller input and text delivery. The
+ * external renderer retains its GX2 session, heaps and presentation buffers.
+ *
+ * run synchronously invokes callback exactly once on the GX2 submission thread,
+ * outside display lists and serialized with rendering, then restores renderer
+ * state. It returns false without invoking callback if graphics are unavailable.
+ * INITIALIZE precedes UPDATE operations; SHUTDOWN follows every invoked
+ * INITIALIZE, including initialization failure or foreground loss. SHUTDOWN must
+ * still execute its cleanup callback when foreground storage has been released;
+ * it must not submit graphics commands in that case.
+ *
+ * draw is called from inside an UPDATE callback on the submission thread. It
+ * binds a single-sample native UI target for each connected output, calls the
+ * corresponding draw callback with GX2 context shadowing disabled, restores
+ * context state, and presents through its existing scan buffers. TV and DRC
+ * callbacks differ; do not mirror the TV keyboard image to the DRC. The native
+ * keyboard uses linear colors. Return false on allocation/presentation failure.
+ *
+ * SDL calls run on the SDL main thread and waits for completion. Neither
+ * callback may pump SDL events, reenter text input or call API-thread rendering
+ * functions. The bridge must remain alive until SDL_StopTextInput() and any
+ * blocking SDL_StartTextInputWithProperties() call have returned. It may free
+ * modal render storage on SHUTDOWN. No second GX2 session is needed.
+ *
+ * See docs/README-wiiu.md for text submission and cancellation semantics.
+ */
+typedef struct SDL_WiiUTextInputGraphics
+{
+    bool (SDLCALL *run)(void *userdata, SDL_WiiUTextInputGraphicsOperation operation,
+                       SDL_WiiUTextInputCallback callback, void *callback_userdata);
+    bool (SDLCALL *draw)(void *userdata, SDL_WiiUTextInputDrawCallback draw_tv,
+                        SDL_WiiUTextInputDrawCallback draw_drc);
+    void *userdata;
+} SDL_WiiUTextInputGraphics;
+
+#define SDL_PROP_WINDOW_WIIU_TEXT_INPUT_GRAPHICS_POINTER "SDL.window.wiiu.text_input_graphics"
+
 typedef Uint32 SDL_WiiUPresentOutputFlags;
 
 #define SDL_WIIU_PRESENT_OUTPUT_NONE 0x0u

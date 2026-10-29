@@ -31,6 +31,8 @@
 
 static SDL_VideoDevice *SDL_WIIU_keyboard_device;
 static bool SDL_WIIU_keyboard_connected[4];
+static bool SDL_WIIU_keyboard_consumed[4][256];
+static Uint16 SDL_WIIU_keyboard_surrogate[4];
 
 static SDL_KeyboardID SDL_WIIU_GetKeyboardID(uint8_t channel)
 {
@@ -54,6 +56,8 @@ static void SDL_WIIU_DetachCallback(KBDAttachEvent *event)
 {
     if (event->channel < SDL_arraysize(SDL_WIIU_keyboard_connected) && SDL_WIIU_keyboard_connected[event->channel]) {
         SDL_WIIU_keyboard_connected[event->channel] = false;
+        SDL_zeroa(SDL_WIIU_keyboard_consumed[event->channel]);
+        SDL_WIIU_keyboard_surrogate[event->channel] = 0;
         SDL_RemoveKeyboard(SDL_WIIU_GetKeyboardID(event->channel));
     }
 }
@@ -68,14 +72,38 @@ static void SDL_WIIU_KeyCallback(KBDKeyEvent *event)
     }
 
     SDL_WIIU_AddKeyboardChannel(event->channel);
+    if (event->channel >= SDL_arraysize(SDL_WIIU_keyboard_connected)) {
+        return;
+    }
+    // The native keyboard consumes its own hardware-keyboard controls too.
+    // Keep swallowing a consumed key until release, including repeat callbacks.
+    if (SDL_WIIU_keyboard_device->screen_keyboard_shown ||
+        SDL_WIIU_keyboard_consumed[event->channel][event->hidCode]) {
+        SDL_WIIU_keyboard_consumed[event->channel][event->hidCode] = event->isPressedDown;
+        SDL_WIIU_keyboard_surrogate[event->channel] = 0;
+        return;
+    }
     SDL_SendKeyboardKey(0, keyboard_id, event->hidCode, scancode, event->isPressedDown ? true : false);
 
     if (event->isPressedDown && event->asUTF16Character != 0) {
+        Uint32 character = event->asUTF16Character;
+        Uint16 *surrogate = &SDL_WIIU_keyboard_surrogate[event->channel];
         char text[5];
         char *end;
 
+        if (character >= 0xD800 && character <= 0xDBFF) {
+            *surrogate = (Uint16)character;
+            return;
+        }
+        if (character >= 0xDC00 && character <= 0xDFFF) {
+            if (!*surrogate) {
+                return;
+            }
+            character = 0x10000 + (((Uint32)*surrogate - 0xD800) << 10) + character - 0xDC00;
+        }
+        *surrogate = 0;
         SDL_zeroa(text);
-        end = SDL_UCS4ToUTF8(event->asUTF16Character, text);
+        end = SDL_UCS4ToUTF8(character, text);
         if (end) {
             *end = '\0';
             SDL_SendKeyboardText(text);
@@ -89,6 +117,8 @@ bool SDL_WIIU_InitKeyboard(SDL_VideoDevice *_this)
 
     SDL_WIIU_keyboard_device = _this;
     SDL_zeroa(SDL_WIIU_keyboard_connected);
+    SDL_zeroa(SDL_WIIU_keyboard_consumed);
+    SDL_zeroa(SDL_WIIU_keyboard_surrogate);
 
     error = KBDInit(0, SDL_WIIU_AttachCallback, SDL_WIIU_DetachCallback, SDL_WIIU_KeyCallback);
     if (error == KDB_ERROR_ALREADY_INITIALIZED) {
@@ -96,6 +126,13 @@ bool SDL_WIIU_InitKeyboard(SDL_VideoDevice *_this)
     }
 
     return error == KDB_ERROR_NONE;
+}
+
+void SDL_WIIU_RestoreKeyboardCallbacks(void)
+{
+    if (SDL_WIIU_keyboard_device) {
+        KBDSetup(SDL_WIIU_AttachCallback, SDL_WIIU_DetachCallback, SDL_WIIU_KeyCallback);
+    }
 }
 
 void SDL_WIIU_QuitKeyboard(void)

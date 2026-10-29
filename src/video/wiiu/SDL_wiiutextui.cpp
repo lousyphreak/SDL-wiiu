@@ -431,31 +431,32 @@ static void SDL_WIIU_PrepareScanTarget(SDL_WiiUScanTarget *target)
     GX2SetColorBuffer(&target->color_buffer, GX2_RENDER_TARGET_0);
     GX2SetViewport(0.0f, 0.0f, (float)target->render_width, (float)target->render_height, 0.0f, 1.0f);
     GX2SetScissor(0, 0, target->render_width, target->render_height);
+    GX2SetContextState(nullptr);
 }
 
-static void SDL_WIIU_PresentModalFrames(SDL_VideoData *driverdata,
+static bool SDL_WIIU_PresentModalFrames(SDL_VideoData *driverdata,
                                         void (*draw_tv)(void),
                                         void (*draw_drc)(void))
 {
-    if (GX2GetSwapInterval() > 0) {
-        SDL_WIIU_BeginRender();
-    }
+    SDL_WIIU_BeginRender();
 
     if (driverdata->tv.scan_buffer) {
         if (!SDL_WIIU_EnsureNativeUIRenderBuffer(driverdata, &driverdata->tv)) {
-            return;
+            return false;
         }
         SDL_WIIU_PrepareScanTarget(&driverdata->tv);
         draw_tv();
+        GX2SetContextState(driverdata->tv.context_state);
         GX2CopyColorBufferToScanBuffer(&driverdata->tv.color_buffer, GX2_SCAN_TARGET_TV);
     }
 
     if (driverdata->drc_connected && driverdata->drc.scan_buffer) {
         if (!SDL_WIIU_EnsureNativeUIRenderBuffer(driverdata, &driverdata->drc)) {
-            return;
+            return false;
         }
         SDL_WIIU_PrepareScanTarget(&driverdata->drc);
         draw_drc();
+        GX2SetContextState(driverdata->drc.context_state);
         GX2CopyColorBufferToScanBuffer(&driverdata->drc.color_buffer, GX2_SCAN_TARGET_DRC);
     }
 
@@ -463,6 +464,7 @@ static void SDL_WIIU_PresentModalFrames(SDL_VideoData *driverdata,
     GX2Flush();
     GX2SetTVEnable(TRUE);
     GX2SetDRCEnable(driverdata->drc_connected ? TRUE : FALSE);
+    return true;
 }
 
 static nn::swkbd::KeyboardMode SDL_WIIU_GetKeyboardMode(SDL_PropertiesID props)
@@ -496,30 +498,145 @@ static nn::swkbd::PasswordMode SDL_WIIU_GetPasswordMode(SDL_PropertiesID props)
     }
 }
 
-static bool SDL_WIIU_RunSoftwareKeyboard(SDL_VideoDevice *_this, SDL_PropertiesID props)
+static void SDL_WIIU_DestroySwkbd(void)
 {
-    SDL_VideoData *driverdata = static_cast<SDL_VideoData *>(_this->internal);
+    if (SDL_wiiu_textui_state.swkbd_ready) {
+        nn::swkbd::Destroy();
+        SDL_wiiu_textui_state.swkbd_ready = false;
+    }
+    if (SDL_wiiu_textui_state.swkbd_work_memory) {
+        MEMFreeToDefaultHeap(SDL_wiiu_textui_state.swkbd_work_memory);
+        SDL_wiiu_textui_state.swkbd_work_memory = nullptr;
+    }
+}
+
+// Do not turn the press that opened the field into a keyboard action, or the
+// keyboard's final confirm/cancel press into a gameplay action after returning.
+static bool SDL_WIIU_ModalControlsHeld(void)
+{
+    const SDL_WiiUDRCState *drc = SDL_WIIU_GetDRCState();
+    if (drc && drc->connected && drc->has_status &&
+        (drc->status.hold || drc->touch.touched)) {
+        return true;
+    }
+    for (int i = 0; i < 4; ++i) {
+        const SDL_WiiUKPADState *kpad = SDL_WIIU_GetKPADState(i);
+        if (!kpad || !kpad->connected || !kpad->has_status) {
+            continue;
+        }
+        Uint32 hold = kpad->status.hold;
+        if (kpad->status.extensionType == WPAD_EXT_PRO_CONTROLLER) {
+            hold |= kpad->status.pro.hold;
+        } else if (kpad->status.extensionType == WPAD_EXT_CLASSIC) {
+            hold |= kpad->status.classic.hold;
+        }
+        if (hold) {
+            return true;
+        }
+    }
+    return false;
+}
+
+struct SDL_WiiUKeyboardSession
+{
+    SDL_VideoData *driverdata;
+    SDL_WiiUTextInputGraphics *graphics;
     nn::swkbd::AppearArg appear_arg;
     nn::swkbd::ControllerInfo controller_info;
     VPADStatus vpad_status;
+    bool result = false;
+    bool submitted = false;
+    bool cancelled = false;
+    bool stop_requested = false;
+    bool hidden = false;
+    char *text = nullptr;
+    char error[256] = {};
+};
+
+static void SDLCALL SDL_WIIU_InitializeKeyboard(void *userdata)
+{
+    auto *session = static_cast<SDL_WiiUKeyboardSession *>(userdata);
+    session->result = SDL_WIIU_EnsureSwkbd();
+    if (session->result && !nn::swkbd::AppearInputForm(session->appear_arg)) {
+        session->result = SDL_SetError("nn::swkbd::AppearInputForm failed");
+    }
+    if (!session->result) {
+        SDL_strlcpy(session->error, SDL_GetError(), sizeof(session->error));
+    }
+}
+
+static void SDLCALL SDL_WIIU_UpdateKeyboard(void *userdata)
+{
+    auto *session = static_cast<SDL_WiiUKeyboardSession *>(userdata);
+    if (session->stop_requested && !session->submitted && !session->cancelled) {
+        session->cancelled = nn::swkbd::DisappearInputForm();
+    }
+    nn::swkbd::Calc(session->controller_info);
+    if (nn::swkbd::IsNeedCalcSubThreadFont()) {
+        nn::swkbd::CalcSubThreadFont();
+    }
+    if (nn::swkbd::IsNeedCalcSubThreadPredict()) {
+        nn::swkbd::CalcSubThreadPredict();
+    }
+    if (!session->submitted && !session->cancelled) {
+        if (nn::swkbd::IsDecideCancelButton(nullptr)) {
+            session->cancelled = true;
+            (void)nn::swkbd::DisappearInputForm();
+        } else if (nn::swkbd::IsDecideOkButton(nullptr)) {
+            session->submitted = true;
+            session->text = SDL_WIIU_UTF16ToUTF8(nn::swkbd::GetInputFormString());
+            (void)nn::swkbd::DisappearInputForm();
+        }
+    }
+    session->result = session->graphics
+        ? session->graphics->draw(session->graphics->userdata, nn::swkbd::DrawTV, nn::swkbd::DrawDRC)
+        : SDL_WIIU_PresentModalFrames(session->driverdata, nn::swkbd::DrawTV, nn::swkbd::DrawDRC);
+    if (!session->result) {
+        SDL_strlcpy(session->error, SDL_GetError(), sizeof(session->error));
+    }
+    session->hidden = nn::swkbd::GetStateInputForm() == nn::swkbd::State::Hidden &&
+                      nn::swkbd::GetStateKeyboard() == nn::swkbd::State::Hidden;
+}
+
+static void SDLCALL SDL_WIIU_ShutdownKeyboard(void *userdata)
+{
+    (void)userdata;
+    SDL_WIIU_DestroySwkbd();
+}
+
+static bool SDL_WIIU_RunKeyboardOperation(SDL_WiiUKeyboardSession *session,
+                                          SDL_WiiUTextInputGraphicsOperation operation,
+                                          SDL_WiiUTextInputCallback callback)
+{
+    if (session->graphics) {
+        return session->graphics->run(session->graphics->userdata, operation, callback, session);
+    }
+    callback(session);
+    return true;
+}
+
+static bool SDL_WIIU_RunSoftwareKeyboard(SDL_VideoDevice *_this, SDL_Window *window, SDL_PropertiesID props)
+{
+    auto *driverdata = static_cast<SDL_VideoData *>(_this->internal);
+    SDL_WiiUKeyboardSession session;
+    session.driverdata = driverdata;
+    session.graphics = driverdata->external_owner ? static_cast<SDL_WiiUTextInputGraphics *>(
+        SDL_GetPointerProperty(SDL_GetWindowProperties(window), SDL_PROP_WINDOW_WIIU_TEXT_INPUT_GRAPHICS_POINTER, nullptr)) : nullptr;
+    if (driverdata->external_owner &&
+        (!session.graphics || !session.graphics->run || !session.graphics->draw)) {
+        return SDL_SetError("External GX2 owner must supply SDL_WiiUTextInputGraphics on the window");
+    }
+    if (!driverdata->foreground_ready || !SDL_WIIU_IsInForeground()) {
+        return SDL_SetError("Wii U foreground graphics are unavailable");
+    }
+    const Uint32 generation = driverdata->foreground_generation;
     nn::swkbd::LanguageType language_type;
     std::u16string title_text = SDL_WIIU_UTF8ToUTF16(SDL_GetStringProperty(props, SDL_PROP_TEXTINPUT_TITLE_STRING, ""));
     std::u16string placeholder_text = SDL_WIIU_UTF8ToUTF16(SDL_GetStringProperty(props, SDL_PROP_TEXTINPUT_PLACEHOLDER_STRING, ""));
     std::u16string default_text = SDL_WIIU_UTF8ToUTF16(SDL_GetStringProperty(props, SDL_PROP_TEXTINPUT_DEFAULT_TEXT_STRING, ""));
     std::u16string ok_text = SDL_WIIU_UTF8ToUTF16("OK");
-    bool submit_pressed = false;
-    bool cancel_pressed = false;
-    char *utf8 = nullptr;
-
-    if (!driverdata->foreground_ready || !SDL_WIIU_IsInForeground()) {
-        return SDL_SetError("Wii U foreground graphics are unavailable");
-    }
-
-    if (!SDL_WIIU_EnsureSwkbd()) {
-        return false;
-    }
-
     SDL_WIIU_GetLanguageRegion(&language_type, nullptr, nullptr, nullptr);
+    auto &appear_arg = session.appear_arg;
     appear_arg.keyboardArg.configArg.languageType = language_type;
     appear_arg.keyboardArg.configArg.keyboardMode = SDL_WIIU_GetKeyboardMode(props);
     appear_arg.keyboardArg.configArg.okString = ok_text.c_str();
@@ -528,62 +645,60 @@ static bool SDL_WIIU_RunSoftwareKeyboard(SDL_VideoDevice *_this, SDL_PropertiesI
     appear_arg.keyboardArg.configArg.drawSysWiiPointer = true;
     appear_arg.inputFormArg.initialText = default_text.empty() ? nullptr : default_text.c_str();
     appear_arg.inputFormArg.hintText = !placeholder_text.empty() ? placeholder_text.c_str() : (title_text.empty() ? nullptr : title_text.c_str());
-    appear_arg.inputFormArg.maxTextLength = (int)SDL_GetNumberProperty(props, SDL_PROP_TEXTINPUT_MAX_LENGTH_NUMBER, -1);
+    const Sint64 max_length = SDL_GetNumberProperty(props, SDL_PROP_TEXTINPUT_MAX_LENGTH_NUMBER, -1);
+    appear_arg.inputFormArg.maxTextLength = max_length < 0 ? -1 : (int)SDL_min(max_length, 9999);
     appear_arg.inputFormArg.passwordMode = SDL_WIIU_GetPasswordMode(props);
     appear_arg.inputFormArg.higlightInitialText = true;
 
-    if (!nn::swkbd::AppearInputForm(appear_arg)) {
-        return SDL_SetError("nn::swkbd::AppearInputForm failed");
+    if (!SDL_WIIU_RunKeyboardOperation(&session, SDL_WIIU_TEXT_INPUT_GRAPHICS_INITIALIZE, SDL_WIIU_InitializeKeyboard)) {
+        return SDL_SetError("External GX2 owner could not initialize native text input");
     }
 
-    SDL_SendScreenKeyboardShown();
-
-    while (SDL_WIIU_IsInForeground()) {
+    bool shown = session.result;
+    if (shown) {
+        SDL_SendScreenKeyboardShown();
+    }
+    bool input_ready = false;
+    while (session.result) {
         SDL_WIIU_PumpLifecycle();
-        SDL_WIIU_BeginDRCUpdateCycle();
-        SDL_WIIU_BeginKPADUpdateCycle();
-        SDL_WIIU_FillSwkbdControllerInfo(&controller_info, &vpad_status);
-        nn::swkbd::Calc(controller_info);
-
-        if (nn::swkbd::IsNeedCalcSubThreadFont()) {
-            nn::swkbd::CalcSubThreadFont();
-        }
-        if (nn::swkbd::IsNeedCalcSubThreadPredict()) {
-            nn::swkbd::CalcSubThreadPredict();
-        }
-
-        if (!submit_pressed && nn::swkbd::IsDecideOkButton(nullptr)) {
-            submit_pressed = true;
-            (void)nn::swkbd::DisappearInputForm();
-        }
-        if (!cancel_pressed && nn::swkbd::IsDecideCancelButton(nullptr)) {
-            cancel_pressed = true;
-            (void)nn::swkbd::DisappearInputForm();
-        }
-
-        SDL_WIIU_PresentModalFrames(driverdata, nn::swkbd::DrawTV, nn::swkbd::DrawDRC);
-
-        if (nn::swkbd::GetStateInputForm() == nn::swkbd::State::Hidden &&
-            nn::swkbd::GetStateKeyboard() == nn::swkbd::State::Hidden) {
+        if (!SDL_WIIU_IsInForeground() || driverdata->foreground_generation != generation) {
+            session.result = SDL_SetError("Wii U foreground changed while the software keyboard was open");
             break;
         }
-    }
-
-    SDL_SendScreenKeyboardHidden();
-
-    if (!SDL_WIIU_IsInForeground()) {
-        return SDL_SetError("Wii U foreground was lost while the software keyboard was open");
-    }
-
-    if (!cancel_pressed) {
-        utf8 = SDL_WIIU_UTF16ToUTF8(nn::swkbd::GetInputFormString());
-        if (utf8 && *utf8) {
-            SDL_SendKeyboardText(utf8);
+        SDL_WIIU_BeginDRCUpdateCycle();
+        SDL_WIIU_BeginKPADUpdateCycle();
+        const bool controls_held = SDL_WIIU_ModalControlsHeld();
+        session.stop_requested = !SDL_TextInputActive(window);
+        input_ready |= !controls_held;
+        if (session.hidden && !controls_held) {
+            break;
         }
-        SDL_free(utf8);
+        SDL_zero(session.controller_info);
+        if (input_ready) {
+            SDL_WIIU_FillSwkbdControllerInfo(&session.controller_info, &session.vpad_status);
+        }
+        if (!SDL_WIIU_RunKeyboardOperation(&session, SDL_WIIU_TEXT_INPUT_GRAPHICS_UPDATE, SDL_WIIU_UpdateKeyboard)) {
+            session.result = SDL_SetError("External GX2 owner could not update native text input");
+        }
     }
 
-    return true;
+    // Destroy on the same graphics thread as Create, including every failure.
+    if (!SDL_WIIU_RunKeyboardOperation(&session, SDL_WIIU_TEXT_INPUT_GRAPHICS_SHUTDOWN, SDL_WIIU_ShutdownKeyboard)) {
+        session.result = SDL_SetError("External GX2 owner could not shut down native text input");
+    }
+    SDL_WIIU_RestoreKeyboardCallbacks();
+    if (!session.result && session.error[0]) {
+        SDL_SetError("%s", session.error);
+    }
+    if (session.result && session.submitted && session.text) {
+        // SDL3 owns the complete dynamically sized UTF-8 event payload.
+        SDL_SendKeyboardText(session.text);
+    }
+    SDL_free(session.text);
+    if (shown) {
+        SDL_SendScreenKeyboardHidden();
+    }
+    return session.result;
 }
 
 static bool SDL_WIIU_RunMessageBox(SDL_VideoDevice *_this, const SDL_MessageBoxData *messageboxdata, int *buttonID)
@@ -629,8 +744,12 @@ static bool SDL_WIIU_RunMessageBox(SDL_VideoDevice *_this, const SDL_MessageBoxD
     appear_arg.errorArg.errorTitle = title_text.empty() ? nullptr : title_text.c_str();
     nn::erreula::AppearErrorViewer(appear_arg);
 
-    while (SDL_WIIU_IsInForeground()) {
+    while (true) {
         SDL_WIIU_PumpLifecycle();
+        if (!SDL_WIIU_IsInForeground()) {
+            break;
+        }
+
         SDL_WIIU_BeginDRCUpdateCycle();
         SDL_WIIU_BeginKPADUpdateCycle();
         SDL_WIIU_FillErreulaControllerInfo(&controller_info, &vpad_status);
@@ -649,7 +768,9 @@ static bool SDL_WIIU_RunMessageBox(SDL_VideoDevice *_this, const SDL_MessageBoxD
             nn::erreula::DisappearErrorViewer();
         }
 
-        SDL_WIIU_PresentModalFrames(driverdata, nn::erreula::DrawTV, nn::erreula::DrawDRC);
+        if (!SDL_WIIU_PresentModalFrames(driverdata, nn::erreula::DrawTV, nn::erreula::DrawDRC)) {
+            return false;
+        }
 
         if (nn::erreula::GetStateErrorViewer() == nn::erreula::State::Hidden) {
             break;
@@ -674,16 +795,15 @@ static bool SDL_WIIU_RunMessageBox(SDL_VideoDevice *_this, const SDL_MessageBoxD
 
 extern "C" bool SDL_WIIU_HasScreenKeyboardSupport(SDL_VideoDevice *_this)
 {
-    return !static_cast<SDL_VideoData *>(_this->internal)->external_owner;
+    (void)_this;
+    return true;
 }
 
-extern "C" bool SDL_WIIU_ShowTextInput(SDL_VideoDevice *_this, SDL_PropertiesID props)
+extern "C" void SDL_WIIU_ShowScreenKeyboard(SDL_VideoDevice *_this, SDL_Window *window, SDL_PropertiesID props)
 {
-    if (!_this) {
-        return SDL_InvalidParamError("_this");
+    if (!SDL_WIIU_RunSoftwareKeyboard(_this, window, props)) {
+        SDL_LogWarn(SDL_LOG_CATEGORY_INPUT, "Wii U software keyboard: %s", SDL_GetError());
     }
-
-    return SDL_WIIU_RunSoftwareKeyboard(_this, props);
 }
 
 extern "C" bool SDL_WIIU_ShowMessageBox(SDL_VideoDevice *_this, const SDL_MessageBoxData *messageboxdata, int *buttonID)
@@ -700,14 +820,7 @@ extern "C" bool SDL_WIIU_ShowMessageBox(SDL_VideoDevice *_this, const SDL_Messag
 
 extern "C" void SDL_WIIU_QuitTextUI(void)
 {
-    if (SDL_wiiu_textui_state.swkbd_ready) {
-        nn::swkbd::Destroy();
-        SDL_wiiu_textui_state.swkbd_ready = false;
-    }
-    if (SDL_wiiu_textui_state.swkbd_work_memory) {
-        MEMFreeToDefaultHeap(SDL_wiiu_textui_state.swkbd_work_memory);
-        SDL_wiiu_textui_state.swkbd_work_memory = nullptr;
-    }
+    SDL_WIIU_DestroySwkbd();
 
     if (SDL_wiiu_textui_state.erreula_ready) {
         nn::erreula::Destroy();

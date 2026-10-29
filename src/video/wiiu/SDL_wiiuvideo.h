@@ -142,6 +142,7 @@ extern void SDL_WIIU_PumpEvents(SDL_VideoDevice *_this);
 extern SDL_Window *SDL_WIIU_GetOutputWindow(SDL_VideoDevice *_this, SDL_WiiUDisplayKind kind);
 extern bool SDL_WIIU_UpdateOutputWindows(SDL_VideoDevice *_this);
 extern bool SDL_WIIU_EnsureNativeUIRenderBuffer(SDL_VideoData *driverdata, SDL_WiiUScanTarget *target);
+extern bool SDL_WIIU_EnsureScanTargetRenderBuffer(SDL_VideoData *driverdata, SDL_WiiUScanTarget *target);
 extern void SDL_WIIU_GetPresentationRect(int src_w, int src_h, int dst_w, int dst_h, SDL_Rect *rect);
 extern void SDL_WIIU_GetWindowPresentationSize(SDL_VideoDevice *_this, SDL_Window *window, int *w, int *h);
 extern Uint32 SDL_WIIU_GetPresentOutputMask(SDL_VideoDevice *_this);
@@ -161,13 +162,14 @@ extern void SDL_WIIU_SuspendMouse(void);
 
 extern bool SDL_WIIU_InitKeyboard(SDL_VideoDevice *_this);
 extern void SDL_WIIU_QuitKeyboard(void);
+extern void SDL_WIIU_RestoreKeyboardCallbacks(void);
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 extern bool SDL_WIIU_HasScreenKeyboardSupport(SDL_VideoDevice *_this);
-extern bool SDL_WIIU_ShowTextInput(SDL_VideoDevice *_this, SDL_PropertiesID props);
+extern void SDL_WIIU_ShowScreenKeyboard(SDL_VideoDevice *_this, SDL_Window *window, SDL_PropertiesID props);
 extern bool SDL_WIIU_ShowMessageBox(SDL_VideoDevice *_this, const SDL_MessageBoxData *messageboxdata, int *buttonID);
 extern void SDL_WIIU_QuitTextUI(void);
 
