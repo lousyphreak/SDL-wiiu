@@ -515,7 +515,8 @@ static void WIIU_DestroyTextureData(WIIU_TextureData *texturedata)
         return;
     }
 
-    if (texturedata->texture.surface.image || texturedata->texture_u.surface.image || texturedata->texture_v.surface.image) {
+    if (SDL_WIIU_IsInForeground() &&
+        (texturedata->texture.surface.image || texturedata->texture_u.surface.image || texturedata->texture_v.surface.image)) {
         GX2DrawDone();
     }
 
@@ -1086,7 +1087,9 @@ static void WIIU_DestroyPalette(SDL_Renderer *renderer, SDL_TexturePalette *pale
         return;
     }
 
-    GX2DrawDone();
+    if (SDL_WIIU_IsInForeground()) {
+        GX2DrawDone();
+    }
     WIIU_DestroyGX2Texture(&palettedata->texture);
     SDL_free(palettedata);
     palette->internal = NULL;
@@ -2131,7 +2134,9 @@ static void WIIU_DestroyRenderer(SDL_Renderer *renderer)
         return;
     }
 
-    GX2DrawDone();
+    if (SDL_WIIU_IsInForeground()) {
+        GX2DrawDone();
+    }
     WIIU_DestroyTextureData(&data->backbuffer);
     if (data->vertex_buffer.buffer) {
         GX2RDestroyBufferEx(&data->vertex_buffer, 0);
